@@ -1,0 +1,13 @@
+/* CSS reset and basic styles for SchemaShift UI */
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+
+#root {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
