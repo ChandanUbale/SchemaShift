@@ -1,25 +1,31 @@
+# ── IMPORTANT: all versions below ship pre-built binary wheels for Python 3.13
+# ──            (no Rust / MSVC compilation required). Do not downgrade pydantic
+# ──            below 2.11 — older releases have no cp313 wheels and will fail
+# ──            to build on machines without Visual Studio Build Tools.
+
 # ── Web framework ──────────────────────────────────────────────────────────────
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-python-multipart==0.0.9       # form data / file uploads
-sse-starlette==2.1.0          # Server-Sent Events for progress streaming
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32      # form data / file uploads
+sse-starlette==3.4.11         # Server-Sent Events for progress streaming
 
 # ── Data / config ─────────────────────────────────────────────────────────────
-pydantic==2.7.1
-pydantic-settings==2.2.1
+pydantic==2.13.5
+pydantic-core==2.46.5         # explicit pin — must match pydantic version
+pydantic-settings==2.15.0
 
 # ── App metadata store (SQLite) ────────────────────────────────────────────────
-sqlalchemy==2.0.30
-alembic==1.13.1
+sqlalchemy==2.0.52
+alembic==1.20.0
 
 # ── Source connectors ─────────────────────────────────────────────────────────
-pymysql==1.1.0                # MySQL source connector (MIT)
-pymongo==4.7.2                # MongoDB source + target connector (Apache 2.0)
+pymysql==1.2.0                # MySQL source connector (MIT)
+pymongo==4.18.1               # MongoDB source + target connector (Apache 2.0)
 
 # ── Optional LLM (Ollama) ─────────────────────────────────────────────────────
-httpx==0.27.0                 # async HTTP for Ollama calls
+httpx==0.28.1                 # async HTTP for Ollama calls
 
 # ── Testing ───────────────────────────────────────────────────────────────────
-pytest==8.2.0
-pytest-asyncio==0.23.6
+pytest==9.1.1
+pytest-asyncio==1.4.0
 httpx                         # also used by TestClient
