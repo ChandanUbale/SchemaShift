@@ -1,0 +1,33 @@
+[
+  {
+    "_id": { "$oid": "60a7d9b9c9f0a2001f3f4c10" },
+    "name": "Alice Smith",
+    "email": "alice@example.com",
+    "created_at": { "$date": "2023-01-01T10:00:00Z" },
+    "orders": [
+      {
+        "order_date": "2023-02-01",
+        "total": 100.50,
+        "items": [
+          { "product_name": "Widget A", "quantity": 2, "price": 25.00 },
+          { "product_name": "Widget B", "quantity": 1, "price": 50.50 }
+        ]
+      }
+    ]
+  },
+  {
+    "_id": { "$oid": "60a7d9b9c9f0a2001f3f4c11" },
+    "name": "Bob Jones",
+    "email": "bob@example.com",
+    "created_at": { "$date": "2023-01-02T11:00:00Z" },
+    "orders": [
+      {
+        "order_date": "2023-02-02",
+        "total": 200.00,
+        "items": [
+          { "product_name": "Widget C", "quantity": 4, "price": 50.00 }
+        ]
+      }
+    ]
+  }
+]
