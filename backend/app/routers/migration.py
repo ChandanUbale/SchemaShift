@@ -62,18 +62,18 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{job_id}/stream")
-def stream_progress(job_id: str):
+async def stream_progress(job_id: str):
     """
     Server-Sent Events stream for live progress updates.
-    Reads from the in-memory progress cache (jobs.py).
-
-    TODO: yield SSE events from jobs._progress_cache[job_id] until DONE/FAILED.
+    Delegates to jobs.sse_generator which polls the in-memory progress cache.
     """
-    async def event_generator():
-        # TODO: implement SSE generator
-        yield "data: {}\n\n"
+    from app.jobs import sse_generator  # local import to avoid circular import at module level
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_generator(job_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/cleanup", status_code=204)

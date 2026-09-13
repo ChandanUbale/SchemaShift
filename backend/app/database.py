@@ -54,6 +54,7 @@ def get_db():
 
 
 # ---------------------------------------------------------------------------
-# TODO: call Base.metadata.create_all(bind=engine) on startup
-#       OR rely on Alembic migrations (preferred for production-like usage).
+# Table creation is triggered from main.py lifespan on startup via
+#   Base.metadata.create_all(bind=engine)
+# For production-like usage, prefer Alembic migrations instead.
 # ---------------------------------------------------------------------------
