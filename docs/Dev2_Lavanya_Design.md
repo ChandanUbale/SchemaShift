@@ -44,21 +44,21 @@ Start Task 1 this morning after the 15-minute handshake with Chandan. You do **n
 
 ## Task order at a glance
 
-| Order | Task | Blocked by |
-|---|---|---|
-| **1 FIRST** | Handshake + MongoDB connector | Handshake with Chandan only (15 min). Code is not blocked. Live test needs Kantraj compose + Vinuta Mongo seed |
-| 2 | Discovery for Mongo + graph Mongo branch | Your Task 1. Chandan must have put the discover router skeleton in place (his Task 3). If his endpoints still raise `NotImplementedError`, implement only the Mongo path in the same functions after he has the MySQL path, **or** wait until his Task 3 is merged so you do not overwrite him |
-| 3 | MySQL writer | None to code. Live test needs Kantraj `mysql-target` |
-| 4 | Transformer: relational → document | Handshake Plan JSON. You can code against the JSON in this file **without** waiting. Full prove waits for Chandan MySQL connector + Mongo writer |
-| 5 | Batch executor skeleton + prove MySQL → Mongo | **Chandan Task 1** (jobs `update_progress`) **and Chandan Task 4** (MongoWriter) **and Chandan Task 2** (MySQLConnector) **and your Task 4** |
-| 6 | Transformer: document → relational | Your Task 4 shape. Not blocked by Chandan |
-| 7 | Dry runner | Your Task 4. Must not wait on writers |
-| 8 | Approval gate on execute | Your Task 5. Extra confirm uses Chandan’s profiling `risk_label` |
-| 9 | Retry, audit log, cleanup | Your Task 5 and Task 3 (cleanup uses writers) |
-| 10 | Checksum + relationship validators + report | **Chandan Task 9** (count + aggregate). You call his functions inside the report |
-| 11 | Pair with Chandan: Mongo → MySQL E2E | Your Tasks 1, 3, 6, 5, 8 and Vinuta Mongo seed |
-| 12 | Answer Kantraj for UI Steps 5–7 | Your dry-run / execute / validation APIs |
-| 13 | Optional Ollama explainer | Only if both directions already work. Cut this first if short on time |
+| Order | Task | Blocked by | Status | Testing |
+|---|---|---|---|---|
+| **1 FIRST** | Handshake + MongoDB connector | Handshake with Chandan only (15 min). Code is not blocked. Live test needs Kantraj compose + Vinuta Mongo seed | ✅ Done | 🔲 Not Tested |
+| 2 | Discovery for Mongo + graph Mongo branch | Your Task 1. Chandan must have put the discover router skeleton in place (his Task 3). If his endpoints still raise `NotImplementedError`, implement only the Mongo path in the same functions after he has the MySQL path, **or** wait until his Task 3 is merged so you do not overwrite him | ⏳ Pending | — |
+| 3 | MySQL writer | None to code. Live test needs Kantraj `mysql-target` | ✅ Done (by Chandan) | 🔲 Not Tested |
+| 4 | Transformer: relational → document | Handshake Plan JSON. You can code against the JSON in this file **without** waiting. Full prove waits for Chandan MySQL connector + Mongo writer | ⏳ Pending | — |
+| 5 | Batch executor skeleton + prove MySQL → Mongo | **Chandan Task 1** (jobs `update_progress`) **and Chandan Task 4** (MongoWriter) **and Chandan Task 2** (MySQLConnector) **and your Task 4** | ⏳ Pending | — |
+| 6 | Transformer: document → relational | Your Task 4 shape. Not blocked by Chandan | ⏳ Pending | — |
+| 7 | Dry runner | Your Task 4. Must not wait on writers | ⏳ Pending | — |
+| 8 | Approval gate on execute | Your Task 5. Extra confirm uses Chandan’s profiling `risk_label` | ⏳ Pending | — |
+| 9 | Retry, audit log, cleanup | Your Task 5 and Task 3 (cleanup uses writers) | ⏳ Pending | — |
+| 10 | Checksum + relationship validators + report | **Chandan Task 9** (count + aggregate). You call his functions inside the report | ⏳ Pending | — |
+| 11 | Pair with Chandan: Mongo → MySQL E2E | Your Tasks 1, 3, 6, 5, 8 and Vinuta Mongo seed | ⏳ Pending | — |
+| 12 | Answer Kantraj for UI Steps 5–7 | Your dry-run / execute / validation APIs | ⏳ Pending | — |
+| 13 | Optional Ollama explainer | Only if both directions already work. Cut this first if short on time | 🚫 Out of Scope | — |
 
 ---
 

@@ -9,7 +9,9 @@ DDL notes: use AUTO_INCREMENT for serial PKs, not SERIAL.
 """
 
 from typing import Any
+import urllib.parse
 import pymysql
+import pymysql.cursors
 
 from app.services.migration.base_writer import BaseWriter
 
@@ -19,38 +21,130 @@ class MySQLWriter(BaseWriter):
     def __init__(self, dsn: str) -> None:
         """
         dsn: mysql+pymysql://user:pass@host:port/dbname
-        TODO: parse DSN for pymysql.connect()
+        Database name is parsed dynamically from the DSN — never hardcoded.
         """
         self.dsn = dsn
         self._conn: pymysql.connections.Connection | None = None
+        self._plan: dict[str, Any] = {}
+        # Tracks tables created during this job (for cleanup)
+        self._created_tables: set[str] = set()
+
+    def _get_connection(self) -> pymysql.connections.Connection:
+        """Parse DSN and open a pymysql connection."""
+        parsed = urllib.parse.urlparse(self.dsn.replace("mysql+pymysql", "mysql"))
+        return pymysql.connect(
+            host=parsed.hostname,
+            port=parsed.port or 3306,
+            user=parsed.username,
+            password=parsed.password or "",
+            database=parsed.path.lstrip("/"),
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False,
+        )
 
     def prepare(self, plan: dict[str, Any]) -> None:
         """
-        Connect to the target and execute CREATE TABLE statements from plan['generated_ddl'].
-        Uses AUTO_INCREMENT PKs.
-        TODO: parse generated_ddl, execute via cursor.
+        Connect to the target MySQL database and execute CREATE TABLE statements
+        from plan['generated_ddl'] if present.
+        Table names come entirely from the DDL — nothing is hardcoded.
         """
-        raise NotImplementedError("TODO: implement MySQLWriter.prepare")
+        self._conn = self._get_connection()
+        self._plan = plan
+
+        ddl: str | None = plan.get("generated_ddl")
+        if not ddl:
+            return
+
+        # Execute each statement in the DDL block individually
+        with self._conn.cursor() as cursor:
+            for statement in ddl.split(";"):
+                stmt = statement.strip()
+                if stmt:
+                    cursor.execute(stmt)
+                    # Track table name from CREATE TABLE statement
+                    upper = stmt.upper()
+                    if "CREATE TABLE" in upper:
+                        # Extract table name: CREATE TABLE `name` or CREATE TABLE IF NOT EXISTS `name`
+                        parts = stmt.replace("`", "").split()
+                        for i, word in enumerate(parts):
+                            if word.upper() == "TABLE":
+                                # skip optional IF NOT EXISTS
+                                next_word = parts[i + 1] if i + 1 < len(parts) else ""
+                                if next_word.upper() == "IF":
+                                    table_name = parts[i + 3] if i + 3 < len(parts) else ""
+                                else:
+                                    table_name = next_word
+                                if table_name:
+                                    self._created_tables.add(table_name.split("(")[0].strip())
+                                break
+        self._conn.commit()
 
     def write_batch(self, rows: list[dict[str, Any]], entity_name: str) -> int:
         """
-        Batch-insert rows into `entity_name` table.
-        Use executemany() for efficiency.
+        Batch-insert rows into the `entity_name` table.
+        Column names are derived dynamically from the row keys — never hardcoded.
         Returns count of rows written.
-        TODO: build INSERT INTO `{entity_name}` (...) VALUES (%s, ...) and executemany().
         """
-        raise NotImplementedError("TODO: implement MySQLWriter.write_batch")
+        if not rows or not self._conn:
+            return 0
+
+        # Derive columns from the first row; all rows must have the same keys
+        columns = list(rows[0].keys())
+        if not columns:
+            return 0
+
+        col_list = ", ".join(f"`{c}`" for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        sql = f"INSERT INTO `{entity_name}` ({col_list}) VALUES ({placeholders})"
+
+        values = [tuple(row.get(c) for c in columns) for row in rows]
+
+        with self._conn.cursor() as cursor:
+            cursor.executemany(sql, values)
+        self._conn.commit()
+
+        return len(rows)
 
     def finalize(self) -> None:
         """
-        Commit the transaction and create any post-migration indexes.
-        TODO: self._conn.commit(); create indexes from plan.
+        Commit any pending transaction and create post-migration indexes
+        as specified in the plan. Table and column names come from the plan.
         """
-        raise NotImplementedError("TODO: implement MySQLWriter.finalize")
+        if not self._conn:
+            return
+
+        self._conn.commit()
+
+        # Create indexes if plan specifies any (optional, plan-driven)
+        indexes = self._plan.get("indexes") or []
+        with self._conn.cursor() as cursor:
+            for idx in indexes:
+                table = idx.get("table")
+                column = idx.get("column")
+                if table and column:
+                    idx_name = f"idx_{table}_{column}"
+                    try:
+                        cursor.execute(
+                            f"CREATE INDEX `{idx_name}` ON `{table}` (`{column}`)"
+                        )
+                    except pymysql.err.OperationalError:
+                        # Index already exists — safe to ignore
+                        pass
+        self._conn.commit()
 
     def cleanup(self, job_id: str) -> None:
         """
-        DROP tables created by this job.
-        TODO: track tables created in prepare(), issue DROP TABLE IF EXISTS.
+        DROP all tables created by this job.
+        Table names were recorded dynamically during prepare().
         """
-        raise NotImplementedError("TODO: implement MySQLWriter.cleanup")
+        if not self._conn:
+            return
+
+        with self._conn.cursor() as cursor:
+            for table in self._created_tables:
+                cursor.execute(f"DROP TABLE IF EXISTS `{table}`")
+        self._conn.commit()
+        self._created_tables.clear()
+
+        self._conn.close()
+        self._conn = None
