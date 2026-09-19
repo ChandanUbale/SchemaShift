@@ -12,17 +12,31 @@ class CountValidator:
     ) -> dict[str, Any]:
         """
         Compare row/document counts per entity between source and target.
-
-        Returns:
-            {
-                "total_source": int,
-                "total_target": int,
-                "match_pct": float,          # e.g. 99.8
-                "per_entity": {
-                    entity_name: {"source": int, "target": int, "match": bool}
-                }
-            }
-
-        TODO: compute totals, per-entity match, overall match_pct.
         """
-        raise NotImplementedError("TODO: implement CountValidator.validate")
+        total_source = sum(source_counts.values())
+        total_target = sum(target_counts.values())
+        
+        if total_source > 0:
+            match_pct = round(100.0 * total_target / total_source, 1)
+        elif total_source == 0 and total_target == 0:
+            match_pct = 100.0
+        else:
+            match_pct = 0.0
+            
+        all_keys = set(source_counts.keys()).union(set(target_counts.keys()))
+        per_entity = {}
+        for key in all_keys:
+            s_val = source_counts.get(key, 0)
+            t_val = target_counts.get(key, 0)
+            per_entity[key] = {
+                "source": s_val,
+                "target": t_val,
+                "match": s_val == t_val
+            }
+            
+        return {
+            "total_source": total_source,
+            "total_target": total_target,
+            "match_pct": match_pct,
+            "per_entity": per_entity
+        }
