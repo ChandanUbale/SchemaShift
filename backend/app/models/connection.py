@@ -7,7 +7,7 @@ Production: encrypt at rest + use a secrets manager.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON
 from app.database import Base
 
 
@@ -19,6 +19,7 @@ class Connection(Base):
     source_type = Column(String(50), nullable=False)    # "mysql" | "mongodb"
     dsn = Column(String(1024), nullable=False)          # connection string — NOT encrypted
     is_source = Column(Boolean, default=True)           # True = source, False = target
+    schema_json = Column(JSON, nullable=True)           # Added for discovery schema
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # TODO: add relationship to ProfilingJob, MigrationJob once those models exist
