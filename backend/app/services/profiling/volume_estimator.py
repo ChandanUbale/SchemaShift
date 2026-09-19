@@ -25,17 +25,35 @@ class VolumeEstimator:
                 "total_rows": int,
                 "total_estimated_mb": float,
             }
-
-        TODO: implement estimation logic.
         """
-        raise NotImplementedError("TODO: implement VolumeEstimator.estimate_source_volume")
+        tables = {}
+        total_bytes = 0
+
+        for table_name, row_count in counts.items():
+            estimated_bytes = row_count * avg_row_bytes
+            tables[table_name] = {
+                "row_count": row_count,
+                "estimated_bytes": estimated_bytes,
+            }
+            total_bytes += estimated_bytes
+
+        return {
+            "tables": tables,
+            "total_rows": sum(counts.values()),
+            "total_estimated_mb": round(total_bytes / 1_000_000, 2),
+        }
 
     @staticmethod
     def estimate_target_overhead(source_type: str, target_type: str, source_bytes: int) -> int:
         """
         Heuristic overhead multiplier for target storage.
-        e.g. MySQL → MongoDB may embed related rows, increasing doc size.
+        - mysql → mongodb: 1.4x  (embedding copies parent fields)
+        - mongodb → mysql: 1.1x
+        - same type: 1.0x
         Returns estimated target bytes.
-        TODO: apply source→target multiplier (1.0–2.0 for MVP).
         """
-        raise NotImplementedError("TODO: implement VolumeEstimator.estimate_target_overhead")
+        if source_type == "mysql" and target_type == "mongodb":
+            return int(source_bytes * 1.4)
+        if source_type == "mongodb" and target_type == "mysql":
+            return int(source_bytes * 1.1)
+        return source_bytes

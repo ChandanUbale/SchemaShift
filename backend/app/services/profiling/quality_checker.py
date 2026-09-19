@@ -23,10 +23,17 @@ class QualityChecker:
     @staticmethod
     def detect_duplicate_pks(rows: list[dict[str, Any]], pk_field: str) -> int:
         """
-        Count rows where pk_field is duplicated.
-        TODO: count values that appear more than once.
+        Count rows where pk_field value appears more than once.
+        Returns 0 if pk_field is missing from all rows.
         """
-        raise NotImplementedError("TODO: implement detect_duplicate_pks")
+        if not rows or pk_field not in rows[0]:
+            return 0
+
+        from collections import Counter
+        pk_values = [row.get(pk_field) for row in rows if row.get(pk_field) is not None]
+        counts = Counter(pk_values)
+        # Count total rows that are duplicates (appear more than once)
+        return sum(count for count in counts.values() if count > 1)
 
     @staticmethod
     def detect_orphan_fks(
@@ -35,18 +42,39 @@ class QualityChecker:
         parent_ids: set[Any],
     ) -> int:
         """
-        Count child rows where fk_field value is not in parent_ids.
-        TODO: {row[fk_field] for row in child_rows if row[fk_field] not in parent_ids}
+        Count child rows whose fk_field value is not None and not in parent_ids.
         """
-        raise NotImplementedError("TODO: implement detect_orphan_fks")
+        return sum(
+            1 for row in child_rows
+            if row.get(fk_field) is not None and row.get(fk_field) not in parent_ids
+        )
 
     @staticmethod
     def detect_invalid_dates(values: list[Any]) -> int:
         """
-        Count values that look like dates/strings but fail ISO 8601 parsing.
-        TODO: attempt datetime.fromisoformat() or dateutil.parse() on each value.
+        Count values that look like date strings but fail ISO 8601 parsing.
+        Already-parsed date/datetime objects are considered valid.
         """
-        raise NotImplementedError("TODO: implement detect_invalid_dates")
+        from datetime import date, datetime
+
+        invalid = 0
+        for v in values:
+            if v is None:
+                continue
+            # Already a proper date or datetime — valid
+            if isinstance(v, (date, datetime)):
+                continue
+            # String — try parsing
+            if isinstance(v, str):
+                # Explicitly reject the zero date
+                if v == '0000-00-00' or v.startswith('0000-00-00'):
+                    invalid += 1
+                    continue
+                try:
+                    datetime.fromisoformat(v.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    invalid += 1
+        return invalid
 
     @staticmethod
     def compute_risk_score(invalid: int, orphans: int, duplicates: int, total: int) -> float:
