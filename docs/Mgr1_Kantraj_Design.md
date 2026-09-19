@@ -338,10 +338,12 @@ Demo MySQL seed shows a non-empty table and a risk label. Dirty rows from Vinuta
 
 ---
 
-## Task 7 — Step 4 Recommend + model preview
+## Task 7 — Step 4 Recommend + model preview (🚫 Future Enhancement)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** The Recommendation and Scoring Engine was deprioritized. **You can either skip this step in the UI wizard entirely, or hardcode a dummy "Relational" success page so the flow continues.**
 
 **Do this after Task 6.**  
-**Blockers:** **Chandan Task 6 and Task 7** — `POST /api/recommendation/`.
+**Blockers:** **Chandan Task 6 and Task 7** — `POST /api/recommendation/` (These are also out of scope).
 
 ### Files
 

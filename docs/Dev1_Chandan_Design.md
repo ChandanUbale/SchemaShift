@@ -579,7 +579,9 @@ Profiling a MySQL demo connection returns a risk label and per-column null/dupli
 
 ---
 
-## Task 6 — Scoring engine (relational vs document)
+## Task 6 — Scoring engine (relational vs document) (🚫 Future Enhancement)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** This feature was deprioritized. **Do not implement it for the hackathon.**
 
 **Do this after Task 5.**  
 **Blockers:** You need a profiling JSON + the workload form. You can unit-test with a fake dict before the API is wired.
@@ -624,7 +626,9 @@ A shop schema (customers/orders/items + FKs) with `nested_together_access=true` 
 
 ---
 
-## Task 7 — Model generator
+## Task 7 — Model generator (🚫 Future Enhancement)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** This feature was deprioritized. **Do not implement it for the hackathon.**
 
 **Do this after Task 6.**  
 **Blockers:** Plan JSON keys must stay as the handshake. Lavanya’s transformer reads `model_tree` / `flatten` / `generated_ddl`.

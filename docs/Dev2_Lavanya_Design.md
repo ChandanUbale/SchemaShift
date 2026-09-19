@@ -680,7 +680,9 @@ SSE: Chandan’s `sse_generator` already exists. Your executor must call `update
 
 ---
 
-## Task 13 — Optional: AI explainer
+## Task 13 — Optional: AI explainer (🚫 Out of Scope)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** This feature was deprioritized to focus on core migration logic. **Do not implement it.**
 
 **Blockers:** Both directions of migrate already work. If not, **skip this**.
 
