@@ -45,19 +45,19 @@ Start Task 1 this morning. Do not wait for other people’s code. You can type i
 
 ## Task order at a glance
 
-| Order | Task | Blocked by |
-|---|---|---|
-| **1 FIRST** | Handshake + connections + job persistence | None |
-| 2 | MySQL connector | None to code. Live test needs Kantraj compose + Vinuta MySQL seed |
-| 3 | Discovery API for MySQL + relationship graph (MySQL) | Task 2 |
-| 4 | Mongo writer | None to code. Live test needs Kantraj Mongo service |
-| 5 | Profiling services + profiling API | Task 2 and Task 3 |
-| 6 | Scoring engine | Task 5 |
-| 7 | Model generator | Task 6. Plan JSON must match the handshake |
-| 8 | Source vs target safety | Task 1 |
-| 9 | Count + aggregate validators | Task 2 |
-| 10 | Pair with Lavanya: MySQL → Mongo end-to-end | Lavanya transformer + batch executor + your Tasks 2, 4, 7 |
-| 11 | Answer Kantraj for UI Steps 1–4 | As he asks. Your APIs for those steps must exist (Tasks 1, 3, 5, 6, 7) |
+| Order | Task | Blocked by | Status | Testing |
+|---|---|---|---|---|
+| **1 FIRST** | Handshake + connections + job persistence | None | ✅ Done | 🔲 Not Tested |
+| 2 | MySQL connector | None to code. Live test needs Kantraj compose + Vinuta MySQL seed | ✅ Done | 🔲 Not Tested |
+| 3 | Discovery API for MySQL + relationship graph (MySQL) | Task 2 | ✅ Done | 🔲 Not Tested |
+| 4 | Mongo writer | None to code. Live test needs Kantraj Mongo service | ✅ Done | 🔲 Not Tested |
+| 5 | Profiling services + profiling API | Task 2 and Task 3 | ✅ Done | 🔲 Not Tested |
+| 6 | Scoring engine | Task 5 | 🚫 Future Enhancement | — |
+| 7 | Model generator | Task 6. Plan JSON must match the handshake | 🚫 Future Enhancement | — |
+| 8 | Source vs target safety | Task 1 | ⏳ Pending | — |
+| 9 | Count + aggregate validators | Task 2 | ⏳ Pending | — |
+| 10 | Pair with Lavanya: MySQL → Mongo end-to-end | Lavanya transformer + batch executor + your Tasks 2, 4, 7 | ⏳ Pending | — |
+| 11 | Answer Kantraj for UI Steps 1–4 | As he asks. Your APIs for those steps must exist (Tasks 1, 3, 5, 6, 7) | ⏳ Pending | — |
 
 ---
 
@@ -579,7 +579,9 @@ Profiling a MySQL demo connection returns a risk label and per-column null/dupli
 
 ---
 
-## Task 6 — Scoring engine (relational vs document)
+## Task 6 — Scoring engine (relational vs document) (🚫 Future Enhancement)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** This feature was deprioritized. **Do not implement it for the hackathon.**
 
 **Do this after Task 5.**  
 **Blockers:** You need a profiling JSON + the workload form. You can unit-test with a fake dict before the API is wired.
@@ -624,7 +626,9 @@ A shop schema (customers/orders/items + FKs) with `nested_together_access=true` 
 
 ---
 
-## Task 7 — Model generator
+## Task 7 — Model generator (🚫 Future Enhancement)
+
+> **[🚫 OUT OF SCOPE FOR MVP]** This feature was deprioritized. **Do not implement it for the hackathon.**
 
 **Do this after Task 6.**  
 **Blockers:** Plan JSON keys must stay as the handshake. Lavanya’s transformer reads `model_tree` / `flatten` / `generated_ddl`.
