@@ -8,6 +8,35 @@ Output is used by SchemaGraph.tsx (react-flow) for visualization.
 
 from typing import Any
 
+def _graph_mysql(schema: dict[str, Any]) -> dict[str, Any]:
+    nodes = []
+    edges = []
+    
+    for entity in schema.get("entities", []):
+        table_name = entity.get("name")
+        columns = [col.get("name") for col in entity.get("columns", [])]
+        
+        nodes.append({
+            "id": table_name,
+            "label": table_name,
+            "columns": columns
+        })
+        
+        for fk in entity.get("foreign_keys", []):
+            child_column = fk.get("column")
+            ref_table = fk.get("ref_table")
+            ref_column = fk.get("ref_column")
+            
+            edges.append({
+                "source": table_name,
+                "target": ref_table,
+                "label": f"{child_column} → {ref_column}"
+            })
+            
+    return {"nodes": nodes, "edges": edges}
+
+def _graph_mongo(schema: dict[str, Any]) -> dict[str, Any]:
+    raise NotImplementedError("TODO: implement mongo graph (Dev 2)")
 
 class RelationshipMapper:
 
@@ -25,9 +54,10 @@ class RelationshipMapper:
                 "nodes": [{"id": str, "label": str, "columns": [...]}],
                 "edges": [{"source": str, "target": str, "label": str}]
             }
-
-        TODO:
-        - MySQL: extract foreign_keys from each table's describe_entity output
-        - MongoDB: detect reference patterns (_id fields pointing to other collections)
         """
-        raise NotImplementedError("TODO: implement RelationshipMapper.build_graph")
+        if source_type == "mysql":
+            return _graph_mysql(schema)
+        if source_type == "mongodb":
+            return _graph_mongo(schema)
+        
+        raise ValueError(f"Unknown source type: {source_type}")
