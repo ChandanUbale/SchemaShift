@@ -35,8 +35,44 @@ def _graph_mysql(schema: dict[str, Any]) -> dict[str, Any]:
             
     return {"nodes": nodes, "edges": edges}
 
+def _direct_fields(columns: list[dict], prefix: str) -> list[str]:
+    """Names one level under prefix (empty prefix = top-level / no dots)."""
+    names = []
+    for col in columns:
+        name = col.get("name") or ""
+        if prefix:
+            if not name.startswith(prefix + ".") or "." in name[len(prefix) + 1:]:
+                continue
+            names.append(name[len(prefix) + 1:])
+        elif "." not in name:
+            names.append(name)
+    return names
+
+
 def _graph_mongo(schema: dict[str, Any]) -> dict[str, Any]:
-    raise NotImplementedError("TODO: implement mongo graph (Dev 2)")
+    """Embed graph: collection → nested arrays (customers → orders → items)."""
+    nodes, edges = [], []
+    for entity in schema.get("entities", []):
+        col = entity.get("name")
+        if not col:
+            continue
+        columns = entity.get("columns", [])
+        nest_paths = [n.get("path") for n in entity.get("nesting", []) if n.get("path")]
+        nodes.append({"id": col, "label": col, "columns": _direct_fields(columns, "")})
+        for path in nest_paths:
+            node_id = f"{col}.{path}"
+            parent = col if "." not in path else f"{col}.{path.rsplit('.', 1)[0]}"
+            nodes.append({
+                "id": node_id,
+                "label": path.rsplit(".", 1)[-1],
+                "columns": _direct_fields(columns, path),
+            })
+            edges.append({
+                "source": parent,
+                "target": node_id,
+                "label": f"embeds {path.rsplit('.', 1)[-1]}",
+            })
+    return {"nodes": nodes, "edges": edges}
 
 class RelationshipMapper:
 
