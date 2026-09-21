@@ -9,8 +9,7 @@ from app.services.migration.mongo_writer import MongoWriter
 
 
 def test_dry_runner_does_not_call_writer():
-    """DryRunner.run must not invoke any writer.write_batch method."""
-    raise NotImplementedError("TODO: DryRunner.run not yet implemented")
+    pytest.skip("Task 7 — dry runner")
 
 def test_transformer_relational_to_document():
     from app.services.migration.transformer import Transformer
@@ -56,6 +55,78 @@ def test_writer_factory_raises_for_unknown_type():
     with pytest.raises(ValueError, match="Unsupported target_type"):
         WriterFactory.get_writer("postgresql", "postgresql://localhost/testdb")
 
+class _FakeConnector:
+    def __init__(self, customers, orders=None, items=None):
+        self.customers = customers
+        self.orders = orders or []
+        self.items = items or []
+
+    def estimate_counts(self):
+        return {"customers": len(self.customers), "orders": len(self.orders), "order_items": len(self.items)}
+
+    def fetch_batch(self, name, offset, limit):
+        rows = {"customers": self.customers, "orders": self.orders, "order_items": self.items}.get(name, [])
+        return rows[offset:offset + limit]
+
+
+class _FakeWriter:
+    def __init__(self, fail_first=0):
+        self.prepared = False
+        self.finalized = False
+        self.writes = []
+        self._fail_left = fail_first
+
+    def prepare(self, plan):
+        self.prepared = True
+
+    def write_batch(self, rows, entity_name):
+        if self._fail_left > 0:
+            self._fail_left -= 1
+            raise RuntimeError("write failed")
+        self.writes.append((entity_name, list(rows)))
+        return len(rows)
+
+    def finalize(self):
+        self.finalized = True
+
+
 def test_batch_executor_retries_on_failure():
-    """BatchExecutor retries a failed batch up to MAX_RETRIES times."""
-    raise NotImplementedError("TODO: batch loop not yet implemented")
+    from app.jobs import JobStatus, get_job_status
+    from app.services.migration.batch_executor import MAX_RETRIES, BatchExecutor
+    from app.services.migration.transformer import Transformer
+
+    writer = _FakeWriter(fail_first=2)
+    result = BatchExecutor.run(
+        "job-retry",
+        _FakeConnector([{"id": 1, "name": "A", "email": "a@x.com", "created_at": "2023-01-01"}]),
+        writer,
+        Transformer({}),
+        {"direction": "relational_to_document"},
+        batch_size=1000,
+    )
+    assert writer.prepared and writer.finalized
+    assert result["batches_total"] == 1
+    assert result["batches_failed"] == 0
+    assert result["audit_log"][0]["ok"] is True
+    assert result["audit_log"][0]["attempts"] == 3
+    assert MAX_RETRIES == 3
+    assert get_job_status("job-retry")["status"] == JobStatus.DONE
+
+
+def test_batch_executor_records_failed_batch_after_retries():
+    from app.jobs import JobStatus, get_job_status
+    from app.services.migration.batch_executor import BatchExecutor
+    from app.services.migration.transformer import Transformer
+
+    writer = _FakeWriter(fail_first=5)
+    result = BatchExecutor.run(
+        "job-fail",
+        _FakeConnector([{"id": 1, "name": "A", "email": "a@x.com", "created_at": "2023-01-01"}]),
+        writer,
+        Transformer({}),
+        {"direction": "relational_to_document"},
+        batch_size=1000,
+    )
+    assert result["batches_failed"] == 1
+    assert result["audit_log"][0]["ok"] is False
+    assert get_job_status("job-fail")["status"] == JobStatus.FAILED

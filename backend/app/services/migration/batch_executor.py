@@ -1,23 +1,49 @@
 """
-services/migration/batch_executor.py — Batch migration executor.
+Batch migration executor — the only service allowed to call writer.write_batch().
 
-Responsibilities:
-  - Read batches from the source connector
-  - Transform each batch via Transformer
-  - Write each batch via BaseWriter
-  - Retry failed batches a fixed number of times
-  - Append to the audit log (success/fail per batch)
-  - Push progress to jobs.update_progress() for SSE
-  - Cleanup/reset action (delegated to writer.cleanup())
-
-Hard write boundary: this is the ONLY service allowed to call writer.write_batch().
+Task 5: relational_to_document (MySQL rows → nested Mongo docs).
 """
 
+import math
 from typing import Any
 
-from app.jobs import update_progress, JobStatus
+from app.jobs import JobStatus, get_job_status, update_progress
+from app.jobs import _progress_cache
+from app.services.migration.transformer import _SHOP_TREE
 
 MAX_RETRIES = 3
+_CHILD_FETCH = 10_000_000  # demo scale: load child tables once
+
+
+def _ensure_job(job_id: str) -> None:
+    if get_job_status(job_id) is None:
+        _progress_cache[job_id] = {
+            "job_id": job_id,
+            "job_type": "migration",
+            "status": JobStatus.PENDING,
+            "progress_pct": 0,
+            "error": None,
+        }
+
+
+def _embed_tables(node: dict[str, Any]) -> list[str]:
+    names = []
+    for child in node.get("embed") or []:
+        names.append(child["from_table"])
+        names.extend(_embed_tables(child))
+    return names
+
+
+def _write_with_retry(writer, docs: list[dict], collection: str) -> tuple[bool, int, int, str | None]:
+    if not docs:
+        return True, 0, 0, None
+    err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return True, writer.write_batch(docs, collection), attempt, None
+        except Exception as exc:
+            err = str(exc)
+    return False, 0, MAX_RETRIES, err
 
 
 class BatchExecutor:
@@ -31,27 +57,55 @@ class BatchExecutor:
         plan: dict[str, Any],
         batch_size: int = 1000,
     ) -> dict[str, Any]:
-        """
-        Execute the full migration for a single approved job.
+        direction = plan.get("direction") or "relational_to_document"
+        if direction != "relational_to_document":
+            raise ValueError("BatchExecutor only supports relational_to_document")
 
-        Steps per entity (table / collection):
-          1. connector.estimate_counts() → batches_total
-          2. For each batch:
-               a. connector.fetch_batch(entity, offset, batch_size)
-               b. transformer.transform_row(row, direction) for each row
-               c. writer.write_batch(transformed_rows, entity)
-               d. Retry up to MAX_RETRIES on failure; log outcome
-               e. update_progress(job_id, pct)
-          3. writer.finalize()
+        _ensure_job(job_id)
+        pct = 0
+        try:
+            update_progress(job_id, 0, JobStatus.RUNNING)
+            writer.prepare(plan)
 
-        Returns an audit_log dict summarising batch outcomes.
+            tree = plan.get("model_tree") or _SHOP_TREE
+            root = tree.get("from_table") or tree.get("collection") or "customers"
+            collection = tree.get("collection") or root
+            children = {
+                name: source_connector.fetch_batch(name, 0, _CHILD_FETCH)
+                for name in _embed_tables(tree)
+            }
 
-        TODO: implement the loop, retry logic, progress updates, and audit log.
-        """
-        update_progress(job_id, 0, JobStatus.RUNNING)
-        audit_log: list[dict] = []
+            total = int(source_connector.estimate_counts().get(root, 0) or 0)
+            batches_total = math.ceil(total / batch_size) if total else 0
+            audit_log: list[dict] = []
+            batches_failed = 0
 
-        # TODO: implement batch loop
+            for i, offset in enumerate(range(0, total, batch_size)):
+                parents = source_connector.fetch_batch(root, offset, batch_size)
+                docs = transformer.transform_batch({root: parents, **children}, direction)
+                ok, written, attempts, err = _write_with_retry(writer, docs, collection)
+                audit_log.append({
+                    "batch_index": i,
+                    "entity": collection,
+                    "rows": written if ok else len(docs),
+                    "ok": ok,
+                    "attempts": attempts,
+                    "error": err,
+                })
+                if not ok:
+                    batches_failed += 1
+                pct = int((i + 1) / max(batches_total, 1) * 100)
+                update_progress(job_id, pct, JobStatus.RUNNING)
 
-        update_progress(job_id, 100, JobStatus.DONE)
-        return {"audit_log": audit_log}
+            writer.finalize()
+            status = JobStatus.FAILED if batches_failed else JobStatus.DONE
+            err = f"{batches_failed} batch(es) failed" if batches_failed else None
+            update_progress(job_id, 100, status, error=err)
+            return {
+                "audit_log": audit_log,
+                "batches_total": batches_total,
+                "batches_failed": batches_failed,
+            }
+        except Exception as exc:
+            update_progress(job_id, pct, JobStatus.FAILED, error=str(exc))
+            raise
