@@ -29,6 +29,12 @@ from app.schemas.migration import (
 )
 from app.services.discovery.connector_factory import ConnectorFactory
 from app.services.migration.batch_executor import BatchExecutor
+from app.services.migration.cleanup import (
+    cleanup_entry,
+    entities_from_audit,
+    require_cleanup_allowed,
+    seed_writer_for_cleanup,
+)
 from app.services.migration.dry_runner import DryRunner, default_plan
 from app.services.migration.execute_gate import (
     apply_override,
@@ -363,8 +369,26 @@ async def stream_progress(job_id: str):
 def cleanup_target(payload: CleanupRequest, db: Session = Depends(get_db)):
     """
     Drop this job's migrated tables/collections from the target.
-    No automatic rollback — explicit user action only.
-
-    TODO: call writer_factory.get_writer(target_type).cleanup(job_id)
+    No automatic rollback — explicit user action only. Never touches the source.
     """
-    raise NotImplementedError("TODO: implement cleanup_target")
+    job = db.query(MigrationJob).filter(MigrationJob.job_id == payload.job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        require_cleanup_allowed(job, payload.target_connection_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    target = db.query(Connection).filter(Connection.id == payload.target_connection_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    writer = _open_writer(target.source_type, target.dsn)
+    entities = entities_from_audit(job.audit_log, target.source_type)
+    seed_writer_for_cleanup(writer, entities)
+    writer.cleanup(payload.job_id)
+
+    log = list(job.audit_log or [])
+    log.append(cleanup_entry())
+    job.audit_log = log
+    db.commit()
