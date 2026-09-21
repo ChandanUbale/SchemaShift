@@ -2,6 +2,7 @@
 Batch migration executor — the only service allowed to call writer.write_batch().
 
 Task 5: relational_to_document (MySQL rows → nested Mongo docs).
+Task 6: document_to_relational (Mongo docs → MySQL rows, parents first).
 """
 
 import math
@@ -9,7 +10,7 @@ from typing import Any
 
 from app.jobs import JobStatus, get_job_status, update_progress
 from app.jobs import _progress_cache
-from app.services.migration.transformer import _SHOP_TREE
+from app.services.migration.transformer import _SHOP_FLATTEN, _SHOP_TREE
 
 MAX_RETRIES = 3
 _CHILD_FETCH = 10_000_000  # demo scale: load child tables once
@@ -58,54 +59,135 @@ class BatchExecutor:
         batch_size: int = 1000,
     ) -> dict[str, Any]:
         direction = plan.get("direction") or "relational_to_document"
-        if direction != "relational_to_document":
-            raise ValueError("BatchExecutor only supports relational_to_document")
-
         _ensure_job(job_id)
         pct = 0
         try:
             update_progress(job_id, 0, JobStatus.RUNNING)
             writer.prepare(plan)
 
-            tree = plan.get("model_tree") or _SHOP_TREE
-            root = tree.get("from_table") or tree.get("collection") or "customers"
-            collection = tree.get("collection") or root
-            children = {
-                name: source_connector.fetch_batch(name, 0, _CHILD_FETCH)
-                for name in _embed_tables(tree)
-            }
+            if direction == "document_to_relational":
+                result = BatchExecutor._run_document_to_relational(
+                    job_id, source_connector, writer, transformer, plan, batch_size
+                )
+            elif direction == "relational_to_document":
+                result = BatchExecutor._run_relational_to_document(
+                    job_id, source_connector, writer, transformer, plan, batch_size
+                )
+            else:
+                raise ValueError(f"Unsupported direction: {direction}")
 
-            total = int(source_connector.estimate_counts().get(root, 0) or 0)
-            batches_total = math.ceil(total / batch_size) if total else 0
-            audit_log: list[dict] = []
-            batches_failed = 0
+            writer.finalize()
+            failed = result["batches_failed"]
+            status = JobStatus.FAILED if failed else JobStatus.DONE
+            err = f"{failed} batch(es) failed" if failed else None
+            update_progress(job_id, 100, status, error=err)
+            return result
+        except Exception as exc:
+            update_progress(job_id, pct, JobStatus.FAILED, error=str(exc))
+            raise
 
-            for i, offset in enumerate(range(0, total, batch_size)):
-                parents = source_connector.fetch_batch(root, offset, batch_size)
-                docs = transformer.transform_batch({root: parents, **children}, direction)
-                ok, written, attempts, err = _write_with_retry(writer, docs, collection)
+    @staticmethod
+    def _run_relational_to_document(
+        job_id: str,
+        source_connector,
+        writer,
+        transformer,
+        plan: dict[str, Any],
+        batch_size: int,
+    ) -> dict[str, Any]:
+        tree = plan.get("model_tree") or _SHOP_TREE
+        root = tree.get("from_table") or tree.get("collection") or "customers"
+        collection = tree.get("collection") or root
+        children = {
+            name: source_connector.fetch_batch(name, 0, _CHILD_FETCH)
+            for name in _embed_tables(tree)
+        }
+
+        total = int(source_connector.estimate_counts().get(root, 0) or 0)
+        batches_total = math.ceil(total / batch_size) if total else 0
+        audit_log: list[dict] = []
+        batches_failed = 0
+
+        for i, offset in enumerate(range(0, total, batch_size)):
+            parents = source_connector.fetch_batch(root, offset, batch_size)
+            docs = transformer.transform_batch({root: parents, **children}, "relational_to_document")
+            ok, written, attempts, err = _write_with_retry(writer, docs, collection)
+            audit_log.append({
+                "batch_index": i,
+                "entity": collection,
+                "rows": written if ok else len(docs),
+                "ok": ok,
+                "attempts": attempts,
+                "error": err,
+            })
+            if not ok:
+                batches_failed += 1
+            pct = int((i + 1) / max(batches_total, 1) * 100)
+            update_progress(job_id, pct, JobStatus.RUNNING)
+
+        return {
+            "audit_log": audit_log,
+            "batches_total": batches_total,
+            "batches_failed": batches_failed,
+        }
+
+    @staticmethod
+    def _run_document_to_relational(
+        job_id: str,
+        source_connector,
+        writer,
+        transformer,
+        plan: dict[str, Any],
+        batch_size: int,
+    ) -> dict[str, Any]:
+        flatten = plan.get("flatten") or _SHOP_FLATTEN
+        if not flatten:
+            raise ValueError("document_to_relational requires plan['flatten']")
+        collection = (
+            (plan.get("model_tree") or {}).get("collection")
+            or plan.get("collection")
+            or flatten[0]["table"]
+        )
+        total = int(source_connector.estimate_counts().get(collection, 0) or 0)
+        batches_total = math.ceil(total / batch_size) if total else 0
+        audit_log: list[dict] = []
+        batches_failed = 0
+
+        for i, offset in enumerate(range(0, total, batch_size)):
+            docs = source_connector.fetch_batch(collection, offset, batch_size)
+            tables = transformer.transform_batch({collection: docs}, "document_to_relational")
+            batch_ok = True
+            for spec in flatten:
+                table = spec["table"]
+                rows = tables.get(table) or []
+                if not batch_ok:
+                    audit_log.append({
+                        "batch_index": i,
+                        "entity": table,
+                        "rows": len(rows),
+                        "ok": False,
+                        "attempts": 0,
+                        "error": "skipped after parent batch failure",
+                    })
+                    continue
+                ok, written, attempts, err = _write_with_retry(writer, rows, table)
                 audit_log.append({
                     "batch_index": i,
-                    "entity": collection,
-                    "rows": written if ok else len(docs),
+                    "entity": table,
+                    "rows": written if ok else len(rows),
                     "ok": ok,
                     "attempts": attempts,
                     "error": err,
                 })
                 if not ok:
-                    batches_failed += 1
-                pct = int((i + 1) / max(batches_total, 1) * 100)
-                update_progress(job_id, pct, JobStatus.RUNNING)
+                    batch_ok = False
+            if not batch_ok:
+                batches_failed += 1
+            pct = int((i + 1) / max(batches_total, 1) * 100)
+            update_progress(job_id, pct, JobStatus.RUNNING)
 
-            writer.finalize()
-            status = JobStatus.FAILED if batches_failed else JobStatus.DONE
-            err = f"{batches_failed} batch(es) failed" if batches_failed else None
-            update_progress(job_id, 100, status, error=err)
-            return {
-                "audit_log": audit_log,
-                "batches_total": batches_total,
-                "batches_failed": batches_failed,
-            }
-        except Exception as exc:
-            update_progress(job_id, pct, JobStatus.FAILED, error=str(exc))
-            raise
+        return {
+            "audit_log": audit_log,
+            "batches_total": batches_total,
+            "batches_failed": batches_failed,
+        }

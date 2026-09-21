@@ -38,7 +38,78 @@ def test_transformer_relational_to_document():
 
 
 def test_transformer_document_to_relational():
-    pytest.skip("Task 6 — document_to_relational")
+    from app.services.migration.transformer import Transformer
+
+    doc = {
+        "id": 1,
+        "name": "Alice",
+        "email": "a@x.com",
+        "created_at": "2023-01-01",
+        "orders": [
+            {
+                "id": 10,
+                "order_date": "2023-02-01",
+                "total": 100.5,
+                "status": "paid",
+                "items": [
+                    {"product_id": 1, "product_name": "A", "quantity": 2, "price": 25.0},
+                    {"product_id": 2, "product_name": "B", "quantity": 1, "price": 50.5},
+                ],
+            },
+            {
+                "id": 11,
+                "order_date": "2023-02-02",
+                "total": 20.0,
+                "status": "paid",
+                "items": [
+                    {"product_id": 1, "product_name": "A", "quantity": 1, "price": 20.0},
+                ],
+            },
+        ],
+    }
+    tables = Transformer({})._document_to_relational(doc)
+    assert tables["customers"] == [
+        {"id": 1, "name": "Alice", "email": "a@x.com", "created_at": "2023-01-01"}
+    ]
+    assert len(tables["orders"]) == 2
+    assert tables["orders"][0]["customer_id"] == 1
+    assert tables["orders"][0]["id"] == 10
+    assert tables["orders"][1]["id"] == 11
+    assert len(tables["order_items"]) == 3
+    assert tables["order_items"][0]["order_id"] == 10
+    assert tables["order_items"][2]["order_id"] == 11
+    assert tables["order_items"][0]["product_name"] == "A"
+
+    oid_doc = {"_id": "abc", "name": "Bob", "email": "b@x.com", "created_at": None, "orders": []}
+    oid_tables = Transformer({}).transform_row(oid_doc, "document_to_relational")
+    assert oid_tables["customers"][0]["id"] == "abc"
+    assert oid_tables["orders"] == []
+    assert oid_tables["order_items"] == []
+
+    merged = Transformer({}).transform_batch({"customers": [doc, oid_doc]}, "document_to_relational")
+    assert len(merged["customers"]) == 2
+    assert len(merged["orders"]) == 2
+    assert len(merged["order_items"]) == 3
+
+
+def test_transformer_roundtrip_shop_fixture():
+    from app.services.migration.transformer import Transformer
+
+    tables = {
+        "customers": [{"id": 1, "name": "Alice", "email": "a@x.com", "created_at": "2023-01-01"}],
+        "orders": [
+            {"id": 10, "customer_id": 1, "order_date": "2023-02-01", "total": 100.5, "status": "paid"},
+        ],
+        "order_items": [
+            {"id": 100, "order_id": 10, "product_id": 1, "product_name": "A", "quantity": 2, "price": 25.0},
+        ],
+    }
+    docs = Transformer({}).transform_batch(tables, "relational_to_document")
+    back = Transformer({}).transform_batch({"customers": docs}, "document_to_relational")
+    assert back["customers"][0]["id"] == 1
+    assert back["orders"][0]["customer_id"] == 1
+    assert back["order_items"][0]["order_id"] == 10
+    assert back["order_items"][0]["product_id"] == 1
 
 def test_writer_factory_returns_mysql_writer():
     """WriterFactory.get_writer('mysql', dsn) returns a MySQLWriter instance."""
@@ -130,3 +201,76 @@ def test_batch_executor_records_failed_batch_after_retries():
     assert result["batches_failed"] == 1
     assert result["audit_log"][0]["ok"] is False
     assert get_job_status("job-fail")["status"] == JobStatus.FAILED
+
+
+def test_batch_executor_document_to_relational_writes_parents_first():
+    from app.jobs import JobStatus, get_job_status
+    from app.services.migration.batch_executor import BatchExecutor
+    from app.services.migration.transformer import Transformer
+
+    docs = [{
+        "id": 1,
+        "name": "A",
+        "email": "a@x.com",
+        "created_at": "2023-01-01",
+        "orders": [{
+            "id": 10,
+            "order_date": "2023-02-01",
+            "total": 1,
+            "status": "paid",
+            "items": [{"product_id": 1, "product_name": "A", "quantity": 1, "price": 1}],
+        }],
+    }]
+    writer = _FakeWriter()
+    result = BatchExecutor.run(
+        "job-flatten",
+        _FakeConnector(docs),
+        writer,
+        Transformer({}),
+        {"direction": "document_to_relational"},
+        batch_size=1000,
+    )
+    assert writer.prepared and writer.finalized
+    assert [entity for entity, _rows in writer.writes] == ["customers", "orders", "order_items"]
+    assert writer.writes[0][1][0]["id"] == 1
+    assert writer.writes[1][1][0]["customer_id"] == 1
+    assert writer.writes[2][1][0]["order_id"] == 10
+    assert result["batches_total"] == 1
+    assert result["batches_failed"] == 0
+    assert get_job_status("job-flatten")["status"] == JobStatus.DONE
+
+
+def test_batch_executor_document_to_relational_skips_children_after_parent_fail():
+    from app.jobs import JobStatus, get_job_status
+    from app.services.migration.batch_executor import BatchExecutor
+    from app.services.migration.transformer import Transformer
+
+    docs = [{
+        "id": 1,
+        "name": "A",
+        "email": "a@x.com",
+        "created_at": "2023-01-01",
+        "orders": [{
+            "id": 10,
+            "order_date": "2023-02-01",
+            "total": 1,
+            "status": "paid",
+            "items": [{"product_id": 1, "product_name": "A", "quantity": 1, "price": 1}],
+        }],
+    }]
+    writer = _FakeWriter(fail_first=5)
+    result = BatchExecutor.run(
+        "job-flatten-fail",
+        _FakeConnector(docs),
+        writer,
+        Transformer({}),
+        {"direction": "document_to_relational"},
+        batch_size=1000,
+    )
+    assert result["batches_failed"] == 1
+    assert [entry["entity"] for entry in result["audit_log"]] == ["customers", "orders", "order_items"]
+    assert result["audit_log"][0]["ok"] is False
+    assert result["audit_log"][1]["error"] == "skipped after parent batch failure"
+    assert result["audit_log"][2]["error"] == "skipped after parent batch failure"
+    assert writer.writes == []
+    assert get_job_status("job-flatten-fail")["status"] == JobStatus.FAILED

@@ -1,8 +1,5 @@
 """
 Bidirectional relational ↔ document transformer (in memory, no DB I/O).
-
-Task 4: relational_to_document via transform_batch + model_tree.
-Task 6 (later): document_to_relational.
 """
 
 from collections import defaultdict
@@ -30,11 +27,30 @@ _SHOP_TREE = {
     ],
 }
 
+_SHOP_FLATTEN = [
+    {"table": "customers", "from_path": "$", "fields": ["id", "name", "email", "created_at"]},
+    {"table": "orders", "from_path": "$.orders", "parent_fk": "customer_id",
+     "fields": ["id", "order_date", "total", "status"]},
+    {"table": "order_items", "from_path": "$.orders.items", "parent_fk": "order_id",
+     "fields": ["product_id", "product_name", "quantity", "price"]},
+]
+
 
 def _pick(row: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     if not fields:
-        return dict(row)
+        return {
+            k: v for k, v in row.items()
+            if k != "_id" and not isinstance(v, (list, dict))
+        }
     return {f: row.get(f) for f in fields}
+
+
+def _row_id(row: dict[str, Any]) -> Any:
+    if row.get("id") is not None:
+        return row["id"]
+    if row.get("_id") is not None:
+        return str(row["_id"])
+    return None
 
 
 def _group(rows: list[dict[str, Any]], key: str) -> dict[Any, list[dict[str, Any]]]:
@@ -59,6 +75,50 @@ def _nest(parents: list[dict[str, Any]], node: dict[str, Any], tables: dict[str,
     return docs
 
 
+def _nodes_at(doc: dict[str, Any], dotted: str) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Walk dotted path; return (node, parent) pairs at the leaf."""
+    parts = [p for p in dotted.replace("$.", "").replace("$", "").split(".") if p]
+    stack: list[tuple[dict[str, Any], dict[str, Any] | None]] = [(doc, None)]
+    for part in parts:
+        nxt: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        for node, _parent in stack:
+            child = node.get(part) if isinstance(node, dict) else None
+            if isinstance(child, list):
+                nxt.extend((item, node) for item in child if isinstance(item, dict))
+            elif isinstance(child, dict):
+                nxt.append((child, node))
+        stack = nxt
+    return stack
+
+
+def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {spec["table"]: [] for spec in flatten}
+    for spec in flatten:
+        path = spec.get("from_path") or "$"
+        fields = spec.get("fields") or []
+        table = spec["table"]
+        if path in ("$", ""):
+            row = _pick(doc, fields)
+            if not fields or "id" in fields:
+                rid = _row_id(doc)
+                if rid is not None:
+                    row["id"] = rid
+            out[table].append(row)
+            continue
+        dotted = path.replace("$.", "").lstrip("$")
+        for node, parent in _nodes_at(doc, dotted):
+            row = _pick(node, fields)
+            if not fields or "id" in fields:
+                rid = _row_id(node)
+                if rid is not None:
+                    row["id"] = rid
+            fk = spec.get("parent_fk")
+            if fk and parent is not None:
+                row[fk] = _row_id(parent)
+            out[table].append(row)
+    return out
+
+
 class Transformer:
 
     def __init__(self, plan: dict[str, Any] | None = None) -> None:
@@ -67,23 +127,33 @@ class Transformer:
     def _tree(self) -> dict[str, Any]:
         return self.plan.get("model_tree") or _SHOP_TREE
 
-    def transform_row(self, row: dict[str, Any], direction: str) -> dict[str, Any]:
+    def _flatten_spec(self) -> list[dict[str, Any]]:
+        return self.plan.get("flatten") or _SHOP_FLATTEN
+
+    def transform_row(self, row: dict[str, Any], direction: str) -> Any:
         if direction == "relational_to_document":
             return self._relational_to_document(row)
         if direction == "document_to_relational":
             return self._document_to_relational(row)
         raise ValueError(f"Unknown transform direction: {direction}")
 
-    def transform_batch(self, tables: dict[str, list[dict]], direction: str) -> list[dict[str, Any]]:
-        """Nest grouped relational tables into documents. Used by the batch executor."""
-        if direction != "relational_to_document":
-            raise ValueError(f"transform_batch does not support {direction}")
-        tree = self._tree()
-        root = tree.get("from_table") or tree.get("collection") or "customers"
-        return _nest(tables.get(root, []), tree, tables)
+    def transform_batch(self, tables: dict[str, list[dict]], direction: str) -> Any:
+        if direction == "relational_to_document":
+            tree = self._tree()
+            root = tree.get("from_table") or tree.get("collection") or "customers"
+            return _nest(tables.get(root, []), tree, tables)
+        if direction == "document_to_relational":
+            merged: dict[str, list[dict]] = defaultdict(list)
+            for docs in tables.values():
+                for doc in docs or []:
+                    if not isinstance(doc, dict):
+                        continue
+                    for table, rows in self._document_to_relational(doc).items():
+                        merged[table].extend(rows)
+            return dict(merged)
+        raise ValueError(f"Unknown transform direction: {direction}")
 
     def _relational_to_document(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Single row cannot carry children; nest empty arrays from the plan."""
         tree = self._tree()
         doc = _pick(row, tree.get("fields") or list(row.keys()))
         for child in tree.get("embed") or []:
@@ -91,4 +161,4 @@ class Transformer:
         return doc
 
     def _document_to_relational(self, doc: dict[str, Any]) -> dict[str, list[dict]]:
-        raise NotImplementedError("TODO: implement _document_to_relational")
+        return _flatten_doc(doc, self._flatten_spec())
