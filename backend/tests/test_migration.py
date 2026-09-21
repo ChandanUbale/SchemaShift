@@ -385,3 +385,67 @@ def test_batch_executor_document_to_relational_skips_children_after_parent_fail(
     assert result["audit_log"][2]["error"] == "skipped after parent batch failure"
     assert writer.writes == []
     assert get_job_status("job-flatten-fail")["status"] == JobStatus.FAILED
+
+
+class _DryJob:
+    def __init__(self, status="done"):
+        self.status = status
+
+
+def test_execute_rejects_missing_plan_id():
+    from app.services.migration.execute_gate import PLAN_REQUIRED, require_plan_id
+
+    with pytest.raises(ValueError, match=PLAN_REQUIRED):
+        require_plan_id("")
+    with pytest.raises(ValueError, match=PLAN_REQUIRED):
+        require_plan_id("   ")
+    require_plan_id("plan-1")
+
+
+def test_execute_rejects_without_successful_dry_run():
+    from app.services.migration.execute_gate import DRY_RUN_REQUIRED, require_successful_dry_run
+
+    with pytest.raises(ValueError, match=DRY_RUN_REQUIRED):
+        require_successful_dry_run(None)
+    with pytest.raises(ValueError, match=DRY_RUN_REQUIRED):
+        require_successful_dry_run(_DryJob("failed"))
+    require_successful_dry_run(_DryJob("done"))
+
+
+def test_execute_rejects_high_risk_without_confirm():
+    from app.services.migration.execute_gate import HIGH_RISK_REQUIRED, require_high_risk_confirm
+
+    require_high_risk_confirm(None, False)
+    require_high_risk_confirm("low", False)
+    require_high_risk_confirm("high", True)
+    with pytest.raises(ValueError, match="confirm_high_risk"):
+        require_high_risk_confirm("high", False)
+    assert HIGH_RISK_REQUIRED.startswith("Profiling risk is High")
+
+
+def test_execute_override_rewrites_plan_for_this_job_only():
+    from app.services.migration.execute_gate import apply_override, shop_plan
+
+    plan = shop_plan("mysql", "p1")
+    assert plan["target_type"] == "mongodb"
+    assert plan["direction"] == "relational_to_document"
+    overridden = apply_override(plan, "mysql")
+    assert overridden["target_type"] == "mysql"
+    assert overridden["direction"] == "document_to_relational"
+    assert plan["target_type"] == "mongodb"
+    assert apply_override(plan, None)["target_type"] == "mongodb"
+    assert apply_override(plan, "mongodb")["direction"] == "relational_to_document"
+
+
+def test_assert_distinct_targets_rejects_same_dsn():
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi import HTTPException
+    from app.services.migration.safety import assert_distinct_targets
+
+    dsn = "mysql+pymysql://root:root@localhost:3306/demo"
+    with pytest.raises(HTTPException) as err:
+        assert_distinct_targets(dsn, dsn, False)
+    assert err.value.status_code == 400
+    assert_distinct_targets(dsn, dsn, True)
+    assert_distinct_targets(dsn, "mysql+pymysql://root:root@localhost:3307/migration_target", False)
+    assert fastapi is not None
