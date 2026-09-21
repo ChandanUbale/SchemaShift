@@ -53,6 +53,31 @@ def test_mongodb_walk_detects_nested_orders_and_items():
     assert "orders.items.price" in types
 
 
+def test_mongo_relationship_graph_embeds_orders_and_items():
+    from app.services.discovery.relationship_mapper import RelationshipMapper
+
+    schema = {
+        "source_type": "mongodb",
+        "entities": [{
+            "name": "customers",
+            "columns": [
+                {"name": "_id"}, {"name": "name"}, {"name": "orders"},
+                {"name": "orders.total"}, {"name": "orders.items"},
+                {"name": "orders.items.price"},
+            ],
+            "nesting": [
+                {"path": "orders", "type": "array"},
+                {"path": "orders.items", "type": "array"},
+            ],
+        }],
+    }
+    graph = RelationshipMapper.build_graph(schema, "mongodb")
+    ids = {n["id"] for n in graph["nodes"]}
+    assert ids == {"customers", "customers.orders", "customers.orders.items"}
+    assert {"source": "customers", "target": "customers.orders", "label": "embeds orders"} in graph["edges"]
+    assert {"source": "customers.orders", "target": "customers.orders.items", "label": "embeds items"} in graph["edges"]
+
+
 def test_mysql_connector_list_entities():
     pytest.skip("integration test — needs MySQL")
 
