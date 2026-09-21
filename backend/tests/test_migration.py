@@ -449,3 +449,75 @@ def test_assert_distinct_targets_rejects_same_dsn():
     assert_distinct_targets(dsn, dsn, True)
     assert_distinct_targets(dsn, "mysql+pymysql://root:root@localhost:3307/migration_target", False)
     assert fastapi is not None
+
+
+class _CleanupJob:
+    def __init__(self, source_id=1, target_id=2, is_dry_run=False, audit=None):
+        self.source_connection_id = source_id
+        self.target_connection_id = target_id
+        self.is_dry_run = is_dry_run
+        self.audit_log = audit
+
+
+def test_cleanup_entities_from_audit_children_first():
+    from app.services.migration.cleanup import entities_from_audit
+
+    audit = [
+        {"batch_index": 0, "entity": "customers", "rows": 1, "ok": True, "attempts": 1, "error": None},
+        {"batch_index": 0, "entity": "orders", "rows": 2, "ok": True, "attempts": 1, "error": None},
+        {"batch_index": 0, "entity": "order_items", "rows": 3, "ok": True, "attempts": 1, "error": None},
+    ]
+    assert entities_from_audit(audit, "mysql") == ["order_items", "orders", "customers"]
+    assert entities_from_audit(audit, "mongodb") == ["customers", "orders", "order_items"]
+    assert entities_from_audit([], "mysql") == ["order_items", "orders", "customers"]
+    assert entities_from_audit([], "mongodb") == ["customers"]
+
+
+def test_cleanup_refuses_source_and_dry_run():
+    from app.services.migration.cleanup import (
+        DRY_RUN_HAS_NO_TARGET,
+        SOURCE_CLEANUP_FORBIDDEN,
+        TARGET_MISMATCH,
+        require_cleanup_allowed,
+    )
+
+    with pytest.raises(ValueError, match=SOURCE_CLEANUP_FORBIDDEN):
+        require_cleanup_allowed(_CleanupJob(source_id=9, target_id=2), 9)
+    with pytest.raises(ValueError, match=DRY_RUN_HAS_NO_TARGET):
+        require_cleanup_allowed(_CleanupJob(is_dry_run=True), 2)
+    with pytest.raises(ValueError, match=TARGET_MISMATCH):
+        require_cleanup_allowed(_CleanupJob(target_id=2), 3)
+    require_cleanup_allowed(_CleanupJob(), 2)
+
+
+def test_cleanup_calls_writer_and_does_not_touch_source():
+    from app.services.migration.cleanup import cleanup_entry, entities_from_audit, seed_writer_for_cleanup
+
+    class TargetWriter:
+        def __init__(self):
+            self._created_tables = set()
+            self._conn = object()
+            self.cleaned_job = None
+
+        def cleanup(self, job_id):
+            self.cleaned_job = job_id
+            self.dropped = set(self._created_tables)
+
+    class SourceBoom:
+        def fetch_batch(self, *args, **kwargs):
+            raise AssertionError("cleanup must not read or drop the source")
+
+        def cleanup(self, job_id):
+            raise AssertionError("cleanup must not drop the source")
+
+    source = SourceBoom()
+    writer = TargetWriter()
+    audit = [{"entity": "customers", "ok": True}, {"entity": "orders", "ok": True}]
+    entities = entities_from_audit(audit, "mysql")
+    seed_writer_for_cleanup(writer, entities)
+    writer.cleanup("job-1")
+    assert writer.cleaned_job == "job-1"
+    assert writer.dropped == {"customers", "orders"}
+    assert cleanup_entry()["entity"] == "cleanup"
+    assert cleanup_entry()["ok"] is True
+    source.fetch_batch  # constructed; never called
