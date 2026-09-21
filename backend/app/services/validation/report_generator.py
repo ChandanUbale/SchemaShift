@@ -7,6 +7,7 @@ Combines three stages (kept separate — do NOT fold into one number):
   3. Validation correctness AFTER migration
 """
 
+from pathlib import Path
 from typing import Any
 
 
@@ -43,13 +44,66 @@ class ReportGenerator:
         validation_result: dict[str, Any],
         output_path: str,
     ) -> dict[str, Any]:
-        """
-        Build the final report and write it to output_path as HTML.
-        Returns the report as a JSON-serialisable dict.
+        risk_label = str(profiling_result.get("risk_label") or "low")
+        risk_score = float(profiling_result.get("risk_score") or 0.0)
+        records = int(migration_stats.get("records_migrated") or 0)
+        batches_total = int(migration_stats.get("batches_total") or 0)
+        batches_failed = int(migration_stats.get("batches_failed") or 0)
+        duration = float(migration_stats.get("duration_seconds") or 0.0)
+        count_pct = validation_result.get("count_match_pct")
+        aggregate_match = bool(validation_result.get("aggregate_match"))
+        sample = validation_result.get("sample_matched") or "0/0"
+        relationships = validation_result.get("relationship_checks") or "failed"
+        rel_class = "passed" if relationships == "passed" else "failed"
+        agg_text = "yes" if aggregate_match else "no"
 
-        TODO:
-        - Render HTML sections for each stage using HTML_TEMPLATE
-        - Write to output_path
-        - Return the full report dict
-        """
-        raise NotImplementedError("TODO: implement ReportGenerator.generate")
+        report = {
+            "before": {
+                "heading": "Data quality before",
+                "risk_label": risk_label,
+                "risk_score": risk_score,
+            },
+            "migration": {
+                "heading": "Migration stats",
+                "records_migrated": records,
+                "batches_total": batches_total,
+                "batches_failed": batches_failed,
+                "duration_seconds": duration,
+            },
+            "after": {
+                "heading": "Validation after",
+                "count_match_pct": count_pct,
+                "aggregate_match": aggregate_match,
+                "sample_matched": sample,
+                "relationship_checks": relationships,
+            },
+            "note": "Profiling risk_label/risk_score are separate from validation match %. Do not average them.",
+        }
+
+        body = f"""
+  <h2>1. Data quality before</h2>
+  <p>Risk: <span class="{risk_label}">{risk_label}</span> (score {risk_score})</p>
+  <p>This is source data quality. It is not a validation percentage.</p>
+  <h2>2. Migration stats</h2>
+  <table>
+    <tr><th>Records migrated</th><td>{records}</td></tr>
+    <tr><th>Batches total</th><td>{batches_total}</td></tr>
+    <tr><th>Batches failed</th><td>{batches_failed}</td></tr>
+    <tr><th>Duration (seconds)</th><td>{duration}</td></tr>
+  </table>
+  <h2>3. Validation after</h2>
+  <table>
+    <tr><th>Records matched</th><td>{count_pct}%</td></tr>
+    <tr><th>Aggregate matched</th><td>{agg_text}</td></tr>
+    <tr><th>Sample</th><td>{sample}</td></tr>
+    <tr><th>Relationships</th><td class="{rel_class}">{relationships}</td></tr>
+  </table>
+"""
+        html = HTML_TEMPLATE.format(body=body)
+        if output_path:
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(html, encoding="utf-8")
+        report["html"] = html
+        report["html_report_path"] = output_path
+        return report

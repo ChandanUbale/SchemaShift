@@ -10,7 +10,6 @@ The rule engine (scoring_engine.py) makes the decision.
 Ollama only rewrites the reasons as nicer prose.
 """
 
-import httpx
 from app.config import settings
 
 
@@ -47,6 +46,7 @@ async def explain(recommendation: dict) -> str | None:
     # TODO: call Ollama /api/generate or OpenAI-compatible /v1/chat/completions
     #       with a short timeout (e.g. 5s). Return None on timeout or error.
     try:
+        import httpx
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 f"{settings.ollama_base_url}/chat/completions",

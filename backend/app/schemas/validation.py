@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class ValidationRequest(BaseModel):
-    migration_job_id: int
+    migration_job_id: str
     source_connection_id: int
     target_connection_id: int
     sample_size: int = 100
