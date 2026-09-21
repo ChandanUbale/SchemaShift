@@ -19,6 +19,7 @@ from app.database import get_db, SessionLocal
 from app.jobs import JobStatus, _progress_cache, create_job, get_job_status, update_progress
 from app.models.connection import Connection
 from app.models.migration import MigrationJob
+from app.models.profiling import ProfilingJob
 from app.schemas.migration import (
     CleanupRequest,
     DryRunRequest,
@@ -27,8 +28,18 @@ from app.schemas.migration import (
     MigrationProgressResponse,
 )
 from app.services.discovery.connector_factory import ConnectorFactory
+from app.services.migration.batch_executor import BatchExecutor
 from app.services.migration.dry_runner import DryRunner, default_plan
+from app.services.migration.execute_gate import (
+    apply_override,
+    require_high_risk_confirm,
+    require_plan_id,
+    require_successful_dry_run,
+    shop_plan,
+)
+from app.services.migration.safety import assert_distinct_targets
 from app.services.migration.transformer import Transformer
+from app.services.migration.writer_factory import WriterFactory
 
 router = APIRouter()
 
@@ -46,6 +57,14 @@ def _open_connector(conn_model: Connection):
     raise ValueError(f"Unsupported source_type: {conn_model.source_type}")
 
 
+def _open_writer(target_type: str, dsn: str):
+    if target_type == "mongodb":
+        parsed = urlparse(dsn)
+        db_name = parsed.path.lstrip("/").split("?")[0] or settings.target_mongo_db
+        return WriterFactory.get_writer("mongodb", dsn, db_name=db_name)
+    return WriterFactory.get_writer("mysql", dsn)
+
+
 def _entity_names(conn_model: Connection, direction: str) -> list[str]:
     schema = conn_model.schema_json or {}
     names = [entity["name"] for entity in schema.get("entities") or [] if entity.get("name")]
@@ -61,6 +80,29 @@ def _store_issues(job_id: str, issues: list[dict], sample_size: int) -> None:
         _progress_cache[job_id]["issues"] = issues
         _progress_cache[job_id]["sample_size"] = sample_size
         _progress_cache[job_id]["audit_log"] = issues
+
+
+def _latest_dry_run(db: Session, plan_id: str) -> MigrationJob | None:
+    return (
+        db.query(MigrationJob)
+        .filter(
+            MigrationJob.plan_id == plan_id,
+            MigrationJob.is_dry_run.is_(True),
+            MigrationJob.status == JobStatus.DONE.value,
+        )
+        .order_by(MigrationJob.id.desc())
+        .first()
+    )
+
+
+def _latest_risk_label(db: Session, connection_id: int) -> str | None:
+    row = (
+        db.query(ProfilingJob)
+        .filter(ProfilingJob.connection_id == connection_id)
+        .order_by(ProfilingJob.id.desc())
+        .first()
+    )
+    return row.risk_label if row else None
 
 
 def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
@@ -119,6 +161,61 @@ def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
         db.close()
 
 
+def run_migration_job(
+    job_id: str,
+    source_connection_id: int,
+    target_connection_id: int,
+    plan: dict,
+) -> None:
+    """Background: the only path that is allowed to call writer.write_batch()."""
+    db = SessionLocal()
+    connector = None
+    try:
+        update_progress(job_id, 0, JobStatus.RUNNING)
+        source = db.query(Connection).filter(Connection.id == source_connection_id).first()
+        target = db.query(Connection).filter(Connection.id == target_connection_id).first()
+        if not source or not target:
+            raise ValueError("Connection not found")
+
+        connector = _open_connector(source)
+        connector.connect()
+        writer = _open_writer(plan.get("target_type") or "mongodb", target.dsn)
+        result = BatchExecutor.run(
+            job_id,
+            connector,
+            writer,
+            Transformer(plan),
+            plan,
+            batch_size=settings.batch_size,
+        )
+        failed = int(result.get("batches_failed") or 0)
+        job_row = db.query(MigrationJob).filter(MigrationJob.job_id == job_id).first()
+        if job_row:
+            job_row.audit_log = result.get("audit_log") or []
+            job_row.batches_total = result.get("batches_total")
+            job_row.batches_done = max((result.get("batches_total") or 0) - failed, 0)
+            job_row.progress_pct = 100
+            job_row.status = JobStatus.FAILED.value if failed else JobStatus.DONE.value
+            job_row.error = f"{failed} batch(es) failed" if failed else None
+            job_row.completed_at = datetime.utcnow()
+            db.commit()
+    except Exception as exc:
+        update_progress(job_id, 0, JobStatus.FAILED, error=str(exc))
+        job_row = db.query(MigrationJob).filter(MigrationJob.job_id == job_id).first()
+        if job_row:
+            job_row.status = JobStatus.FAILED.value
+            job_row.error = str(exc)
+            db.commit()
+        raise
+    finally:
+        if connector is not None:
+            try:
+                connector.disconnect()
+            except Exception:
+                pass
+        db.close()
+
+
 @router.post("/dry-run", response_model=DryRunResult, status_code=202)
 def start_dry_run(payload: DryRunRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
@@ -173,16 +270,56 @@ def execute_migration(
     db: Session = Depends(get_db),
 ):
     """
-    Start the real migration. Requires approved=True and a valid plan_id.
-    Writes in batches (BATCH_SIZE). Retries failed batches a fixed number of times.
-    Extra confirmation is enforced by the caller when profiling risk is High.
-
-    TODO:
-    - Validate plan_id exists and approved=True
-    - create_job(db, "migration")
-    - background_tasks.add_task(batch_executor.run, job_id, payload)
+    Start the real migration. POST is the user's approval.
+    Writes only after dry-run succeeded and source/target safety checks pass.
     """
-    raise NotImplementedError("TODO: implement execute_migration")
+    try:
+        require_plan_id(payload.plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    source = db.query(Connection).filter(Connection.id == payload.source_connection_id).first()
+    target = db.query(Connection).filter(Connection.id == payload.target_connection_id).first()
+    if not source or not target:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    try:
+        require_successful_dry_run(_latest_dry_run(db, payload.plan_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    assert_distinct_targets(source.dsn, target.dsn, payload.in_place_optimisation)
+
+    try:
+        require_high_risk_confirm(
+            _latest_risk_label(db, payload.source_connection_id),
+            payload.confirm_high_risk,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    plan = apply_override(shop_plan(source.source_type, payload.plan_id), payload.override_recommendation)
+
+    job_id = create_job(db, "migration", connection_id=payload.source_connection_id)
+    db.add(MigrationJob(
+        job_id=job_id,
+        source_connection_id=payload.source_connection_id,
+        target_connection_id=payload.target_connection_id,
+        plan_id=payload.plan_id,
+        is_dry_run=False,
+        approved=True,
+        status=JobStatus.PENDING.value,
+        audit_log=[],
+    ))
+    db.commit()
+    background_tasks.add_task(
+        run_migration_job,
+        job_id,
+        payload.source_connection_id,
+        payload.target_connection_id,
+        plan,
+    )
+    return {"job_id": job_id}
 
 
 @router.get("/{job_id}/status", response_model=MigrationProgressResponse)

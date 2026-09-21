@@ -30,6 +30,7 @@ class MigrationApproveRequest(BaseModel):
     target_connection_id: int
     override_recommendation: Literal["mysql", "mongodb"] | None = None  # manual override
     in_place_optimisation: bool = False  # must be explicit
+    confirm_high_risk: bool = False
 
 
 class MigrationProgressResponse(BaseModel):
