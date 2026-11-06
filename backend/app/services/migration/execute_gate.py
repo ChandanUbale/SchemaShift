@@ -7,24 +7,11 @@ Does not write to any target.
 
 from typing import Any
 
+from app.services.migration.plan_builder import shop_plan
+
 DRY_RUN_REQUIRED = "Run dry-run before execute"
 HIGH_RISK_REQUIRED = "Profiling risk is High. Set confirm_high_risk=true to proceed."
 PLAN_REQUIRED = "plan_id does not exist"
-
-
-def shop_plan(source_type: str, plan_id: str | None = None) -> dict[str, Any]:
-    """Fixture plan when recommendation_plans is not persisted yet."""
-    if (source_type or "").lower() == "mongodb":
-        return {
-            "plan_id": plan_id,
-            "direction": "document_to_relational",
-            "target_type": "mysql",
-        }
-    return {
-        "plan_id": plan_id,
-        "direction": "relational_to_document",
-        "target_type": "mongodb",
-    }
 
 
 def require_plan_id(plan_id: str | None) -> None:

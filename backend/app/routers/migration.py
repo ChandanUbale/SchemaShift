@@ -35,14 +35,13 @@ from app.services.migration.cleanup import (
     require_cleanup_allowed,
     seed_writer_for_cleanup,
 )
-from app.services.migration.dry_runner import DryRunner, default_plan
+from app.services.migration.dry_runner import DryRunner
 from app.services.migration.execute_gate import (
-    apply_override,
     require_high_risk_confirm,
     require_plan_id,
     require_successful_dry_run,
-    shop_plan,
 )
+from app.services.migration.plan_builder import build_plan, collections_to_read, schema_from_connector
 from app.services.migration.safety import assert_distinct_targets
 from app.services.migration.transformer import Transformer
 from app.services.migration.writer_factory import WriterFactory
@@ -71,12 +70,30 @@ def _open_writer(target_type: str, dsn: str):
     return WriterFactory.get_writer("mysql", dsn)
 
 
-def _entity_names(conn_model: Connection, direction: str) -> list[str]:
+def _database_name(conn_model: Connection) -> str:
+    parsed = urlparse(conn_model.dsn.replace("mysql+pymysql", "mysql"))
+    return parsed.path.lstrip("/").split("?")[0]
+
+
+def _ensure_schema(conn_model: Connection, connector, db: Session) -> dict:
+    schema = conn_model.schema_json or {}
+    if schema.get("entities"):
+        return schema
+    schema = schema_from_connector(connector, conn_model.source_type, _database_name(conn_model))
+    conn_model.schema_json = schema
+    db.commit()
+    return schema
+
+
+def _entity_names(conn_model: Connection, plan: dict) -> list[str]:
+    names = collections_to_read(plan)
+    if names:
+        return names
     schema = conn_model.schema_json or {}
     names = [entity["name"] for entity in schema.get("entities") or [] if entity.get("name")]
     if names:
         return names
-    if direction == "document_to_relational":
+    if plan.get("direction") == "document_to_relational":
         return list(_SHOP_DOCUMENT)
     return list(_SHOP_RELATIONAL)
 
@@ -120,13 +137,15 @@ def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
         if not conn_model:
             raise ValueError(f"Connection {source_connection_id} not found")
 
-        plan = default_plan(conn_model.source_type, plan_id)
         connector = _open_connector(conn_model)
         connector.connect()
         try:
+            schema = _ensure_schema(conn_model, connector, db)
+            target_type = "mysql" if conn_model.source_type == "mongodb" else "mongodb"
+            plan = build_plan(schema, conn_model.source_type, target_type, plan_id)
             sample_n = settings.profile_sample_size
             tables: dict[str, list] = {}
-            for name in _entity_names(conn_model, plan["direction"]):
+            for name in _entity_names(conn_model, plan):
                 try:
                     tables[name] = connector.fetch_sample(name, sample_n)
                 except Exception:
@@ -135,14 +154,8 @@ def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
             connector.disconnect()
 
         update_progress(job_id, 50, JobStatus.RUNNING)
-        if plan["direction"] == "document_to_relational":
-            root = next(iter(tables), "customers")
-            source_data = tables.get(root) or tables.get("customers") or []
-            sample_size = len(source_data)
-        else:
-            source_data = tables
-            sample_size = sum(len(rows) for rows in tables.values())
-
+        source_data = tables
+        sample_size = sum(len(rows) for rows in tables.values())
         issues = DryRunner.run(source_data, Transformer(plan), plan)
         _store_issues(job_id, issues, sample_size)
 
@@ -304,7 +317,18 @@ def execute_migration(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    plan = apply_override(shop_plan(source.source_type, payload.plan_id), payload.override_recommendation)
+    schema = source.schema_json or {}
+    if not schema.get("entities"):
+        probe = _open_connector(source)
+        probe.connect()
+        try:
+            schema = _ensure_schema(source, probe, db)
+        finally:
+            probe.disconnect()
+    target_type = (payload.override_recommendation or target.source_type or "").lower()
+    if target_type not in ("mysql", "mongodb"):
+        target_type = (target.source_type or "mongodb").lower()
+    plan = build_plan(schema, source.source_type, target_type, payload.plan_id)
 
     job_id = create_job(db, "migration", connection_id=payload.source_connection_id)
     db.add(MigrationJob(

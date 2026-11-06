@@ -8,7 +8,9 @@ Uses batch INSERT statements (not LOAD DATA INFILE) for portability.
 DDL notes: use AUTO_INCREMENT for serial PKs, not SERIAL.
 """
 
+from datetime import date, datetime
 from typing import Any
+import json
 import urllib.parse
 import pymysql
 import pymysql.cursors
@@ -88,22 +90,50 @@ class MySQLWriter(BaseWriter):
         if not rows or not self._conn:
             return 0
 
-        # Derive columns from the first row; all rows must have the same keys
-        columns = list(rows[0].keys())
+        columns: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            for key in row.keys():
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
         if not columns:
             return 0
+
+        self._ensure_columns(entity_name, columns)
 
         col_list = ", ".join(f"`{c}`" for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
         sql = f"INSERT INTO `{entity_name}` ({col_list}) VALUES ({placeholders})"
-
-        values = [tuple(row.get(c) for c in columns) for row in rows]
+        values = [tuple(_cell(row.get(c)) for c in columns) for row in rows]
 
         with self._conn.cursor() as cursor:
             cursor.executemany(sql, values)
         self._conn.commit()
 
         return len(rows)
+
+    def _existing_columns(self, entity_name: str) -> set[str]:
+        if not self._conn:
+            return set()
+        with self._conn.cursor() as cursor:
+            cursor.execute(f"SHOW COLUMNS FROM `{entity_name}`")
+            return {row["Field"] for row in cursor.fetchall()}
+
+    def _ensure_columns(self, entity_name: str, columns: list[str]) -> None:
+        """Add missing columns so schemaless Mongo fields still land in MySQL."""
+        try:
+            existing = self._existing_columns(entity_name)
+        except Exception:
+            return
+        missing = [name for name in columns if name not in existing]
+        if not missing or not self._conn:
+            return
+        with self._conn.cursor() as cursor:
+            for name in missing:
+                cursor.execute(f"ALTER TABLE `{entity_name}` ADD COLUMN `{name}` JSON NULL")
+        self._conn.commit()
+        self._created_tables.add(entity_name)
 
     def finalize(self) -> None:
         """
@@ -153,3 +183,11 @@ class MySQLWriter(BaseWriter):
 
         self._conn.close()
         self._conn = None
+
+
+def _cell(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=str)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
