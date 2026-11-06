@@ -5,10 +5,10 @@ MVP writers: MySQLWriter, MongoWriter.
 Stretch/future: add PostgreSQLWriter — no redesign required.
 """
 
+from app.services.discovery.dsn import resolve_dsn
 from app.services.migration.base_writer import BaseWriter
 from app.services.migration.mysql_writer import MySQLWriter
 from app.services.migration.mongo_writer import MongoWriter
-from app.config import settings
 
 
 class WriterFactory:
@@ -39,7 +39,7 @@ class WriterFactory:
                 f"Unsupported target_type '{target_type}'. "
                 f"MVP supports: {supported}."
             )
-        return writer_cls(dsn, **kwargs)
+        return writer_cls(resolve_dsn(dsn), **kwargs)
 
     @classmethod
     def supported_types(cls) -> list[str]:

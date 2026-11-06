@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # ── Migration / profiling ─────────────────────────────────────────────────
     batch_size: int = 1000
     profile_sample_size: int = 10_000
+    docker_dsn_rewrite: bool = False
 
 
 # Singleton used throughout the app

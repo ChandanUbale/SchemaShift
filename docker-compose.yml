@@ -15,6 +15,7 @@ services:
       - DEMO_MONGO_SRC_URI=mongodb://mongo:27017/demo_source
       - TARGET_MONGO_URI=mongodb://mongo:27017
       - TARGET_MONGO_DB=migration_target
+      - DOCKER_DSN_REWRITE=true
     volumes:
       - ./backend:/app
     depends_on:

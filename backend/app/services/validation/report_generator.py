@@ -20,6 +20,7 @@ HTML_TEMPLATE = """
   <style>
     body {{ font-family: sans-serif; max-width: 900px; margin: 2rem auto; }}
     h1 {{ color: #1a1a2e; }}
+    .back {{ display: inline-block; margin-bottom: 1rem; color: #111827; }}
     table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
     th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
     th {{ background: #f4f4f4; }}
@@ -28,6 +29,7 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body>
+  <p><a class="back" href="javascript:history.back()">← Back to SchemaShift</a></p>
   <h1>SchemaShift Migration Report</h1>
   {body}
 </body>

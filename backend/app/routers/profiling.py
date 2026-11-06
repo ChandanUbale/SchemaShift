@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
-from app.jobs import create_job, update_progress, get_job_status, JobStatus
+from app.jobs import create_job, update_progress, get_job_status, JobStatus, status_text
 from app.models.connection import Connection
 from app.models.profiling import ProfilingJob
 from app.schemas.profiling import ProfilingRequest, ProfilingResult
@@ -139,6 +139,8 @@ def start_profiling(
     Profiling reads source only — zero target writes.
     """
     job_id = create_job(db, "profiling", connection_id=payload.connection_id)
+    db.add(ProfilingJob(job_id=job_id, connection_id=payload.connection_id, status="pending"))
+    db.commit()
     background_tasks.add_task(
         run_profiling, job_id, payload.connection_id, payload.sample_size
     )
@@ -163,7 +165,7 @@ def get_profiling_result(job_id: str, db: Session = Depends(get_db)):
 
     return ProfilingResult(
         job_id=job_id,
-        status=str(status),
+        status=status_text(status),
         risk_label=risk_label,
         risk_score=risk_score,
         tables=tables,
