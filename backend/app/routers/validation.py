@@ -29,6 +29,39 @@ _NUMERIC_FIELDS = {
 }
 
 
+def _numeric_fields(src_counts: dict, tgt_counts: dict) -> dict[str, list[str]]:
+    names = set(src_counts) | set(tgt_counts)
+    return {entity: fields for entity, fields in _NUMERIC_FIELDS.items() if entity in names}
+
+
+def _checksum_entity(src_counts: dict, tgt_counts: dict) -> str | None:
+    common = [name for name, count in src_counts.items() if count and tgt_counts.get(name)]
+    if "customers" in common:
+        return "customers"
+    return common[0] if common else None
+
+
+def _fk_map(target_model: Connection, tgt_counts: dict) -> list[dict[str, str]]:
+    if target_model.source_type == "mongodb":
+        return []
+    fks: list[dict[str, str]] = []
+    for entity in (target_model.schema_json or {}).get("entities") or []:
+        for fk in entity.get("foreign_keys") or []:
+            if not fk.get("column") or not fk.get("ref_table"):
+                continue
+            fks.append({
+                "child_table": entity["name"],
+                "fk_field": fk["column"],
+                "parent_table": fk["ref_table"],
+                "pk_field": fk.get("ref_column") or "id",
+            })
+    if fks:
+        return fks
+    if {"customers", "orders", "order_items"} <= set(tgt_counts):
+        return list(_SHOP_FKS)
+    return []
+
+
 def _open_connector(conn_model: Connection):
     if conn_model.source_type == "mysql":
         return ConnectorFactory.get_connector("mysql", conn_model.dsn)
@@ -100,19 +133,28 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
         source.connect()
         target.connect()
 
-        counts_aggs = run_count_and_aggregate(source, target, _NUMERIC_FIELDS)
+        src_counts = source.estimate_counts() or {}
+        tgt_counts = target.estimate_counts() or {}
+        numeric_fields = _numeric_fields(src_counts, tgt_counts)
+        counts_aggs = run_count_and_aggregate(source, target, numeric_fields)
         update_progress(job_id, 40, JobStatus.RUNNING)
 
         sample_n = payload.sample_size or 100
-        src_rows = source.fetch_sample("customers", sample_n)
-        try:
-            tgt_rows = target.fetch_sample("customers", sample_n)
-        except Exception:
-            tgt_rows = []
+        checksum_entity = _checksum_entity(src_counts, tgt_counts)
+        src_rows, tgt_rows = [], []
+        if checksum_entity:
+            try:
+                src_rows = source.fetch_sample(checksum_entity, sample_n)
+            except Exception:
+                src_rows = []
+            try:
+                tgt_rows = target.fetch_sample(checksum_entity, sample_n)
+            except Exception:
+                tgt_rows = []
         checksum = ChecksumValidator.validate(src_rows, tgt_rows, "id")
         update_progress(job_id, 70, JobStatus.RUNNING)
 
-        fk_map = [] if target_model.source_type == "mongodb" else list(_SHOP_FKS)
+        fk_map = _fk_map(target_model, tgt_counts)
         relationships = RelationshipValidator.validate_fk_integrity(target, fk_map)
 
         validation_result = {

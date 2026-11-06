@@ -2,6 +2,7 @@
 Bidirectional relational ↔ document transformer (in memory, no DB I/O).
 """
 
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -36,13 +37,36 @@ _SHOP_FLATTEN = [
 ]
 
 
-def _pick(row: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+def _sql_value(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=str)
+    return value
+
+
+def _pick(
+    row: dict[str, Any],
+    fields: list[str],
+    json_fields: list[str] | None = None,
+    rename: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    json_fields = set(json_fields or [])
+    rename = rename or {}
     if not fields:
-        return {
-            k: v for k, v in row.items()
-            if k != "_id" and not isinstance(v, (list, dict))
-        }
-    return {f: row.get(f) for f in fields}
+        items = [(key, value) for key, value in row.items() if key != "_id"]
+    else:
+        items = []
+        for field in fields:
+            if field == "id" and field not in row:
+                continue
+            items.append((field, row.get(field)))
+    out: dict[str, Any] = {}
+    for field, value in items:
+        key = rename.get(field, field)
+        if field in json_fields or isinstance(value, (dict, list)):
+            out[key] = None if value is None else _sql_value(value)
+        else:
+            out[key] = value
+    return out
 
 
 def _row_id(row: dict[str, Any]) -> Any:
@@ -97,26 +121,48 @@ def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str
         path = spec.get("from_path") or "$"
         fields = spec.get("fields") or []
         table = spec["table"]
+        json_fields = spec.get("json_fields") or []
+        rename = spec.get("rename") or {}
         if path in ("$", ""):
-            row = _pick(doc, fields)
+            row = _pick(doc, fields, json_fields, rename)
             if not fields or "id" in fields:
                 rid = _row_id(doc)
                 if rid is not None:
-                    row["id"] = rid
+                    row[rename.get("id", "id")] = rid
             out[table].append(row)
             continue
         dotted = path.replace("$.", "").lstrip("$")
         for node, parent in _nodes_at(doc, dotted):
-            row = _pick(node, fields)
+            row = _pick(node, fields, json_fields, rename)
             if not fields or "id" in fields:
                 rid = _row_id(node)
                 if rid is not None:
-                    row["id"] = rid
+                    row[rename.get("id", "id")] = rid
             fk = spec.get("parent_fk")
             if fk and parent is not None:
                 row[fk] = _row_id(parent)
             out[table].append(row)
     return out
+
+
+def _specs_for_collection(flatten: list[dict[str, Any]], collection: str) -> list[dict[str, Any]]:
+    matched = [spec for spec in flatten if spec.get("collection") == collection]
+    if matched:
+        return matched
+    roots = [
+        spec for spec in flatten
+        if (spec.get("from_path") or "$") in ("$", "") and spec.get("table") == collection
+    ]
+    if roots:
+        children = [
+            spec for spec in flatten
+            if (spec.get("from_path") or "$") not in ("$", "") and not spec.get("collection")
+        ]
+        return roots + children
+    tagged = {spec.get("collection") for spec in flatten if spec.get("collection")}
+    if not tagged:
+        return flatten
+    return []
 
 
 class Transformer:
@@ -143,12 +189,16 @@ class Transformer:
             root = tree.get("from_table") or tree.get("collection") or "customers"
             return _nest(tables.get(root, []), tree, tables)
         if direction == "document_to_relational":
+            flatten = self._flatten_spec()
             merged: dict[str, list[dict]] = defaultdict(list)
-            for docs in tables.values():
+            for collection, docs in tables.items():
+                specs = _specs_for_collection(flatten, collection)
+                if not specs:
+                    continue
                 for doc in docs or []:
                     if not isinstance(doc, dict):
                         continue
-                    for table, rows in self._document_to_relational(doc).items():
+                    for table, rows in _flatten_doc(doc, specs).items():
                         merged[table].extend(rows)
             return dict(merged)
         raise ValueError(f"Unknown transform direction: {direction}")

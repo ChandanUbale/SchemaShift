@@ -222,6 +222,140 @@ def test_transformer_roundtrip_shop_fixture():
     assert back["order_items"][0]["order_id"] == 10
     assert back["order_items"][0]["product_id"] == 1
 
+
+def test_plan_builder_converts_any_mongo_collections():
+    import json
+    from app.services.migration.plan_builder import build_plan, collections_to_read
+    from app.services.migration.transformer import Transformer
+
+    schema = {
+        "source_type": "mongodb",
+        "entities": [
+            {
+                "name": "mapping_categories",
+                "columns": [
+                    {"name": "_id", "data_type": "objectid"},
+                    {"name": "name", "data_type": "string"},
+                    {"name": "isActive", "data_type": "boolean"},
+                    {"name": "meta", "data_type": "object"},
+                ],
+                "nesting": [],
+            },
+            {
+                "name": "trayport_trades_xcap",
+                "columns": [
+                    {"name": "_id", "data_type": "objectid"},
+                    {"name": "qty", "data_type": "number"},
+                ],
+                "nesting": [],
+            },
+        ],
+    }
+    plan = build_plan(schema, "mongodb", "mysql", "plan-xcap")
+    assert plan["direction"] == "document_to_relational"
+    assert plan["target_type"] == "mysql"
+    assert {spec["table"] for spec in plan["flatten"]} == {"mapping_categories", "trayport_trades_xcap"}
+    assert collections_to_read(plan) == ["mapping_categories", "trayport_trades_xcap"]
+    assert "CREATE TABLE IF NOT EXISTS `mapping_categories`" in plan["generated_ddl"]
+    assert "CREATE TABLE IF NOT EXISTS `trayport_trades_xcap`" in plan["generated_ddl"]
+
+    tables = Transformer(plan).transform_batch(
+        {
+            "mapping_categories": [{
+                "_id": "a1",
+                "name": "Rates",
+                "isActive": True,
+                "meta": {"region": "EU"},
+            }],
+            "trayport_trades_xcap": [{"_id": "t1", "qty": 12}],
+        },
+        "document_to_relational",
+    )
+    assert tables["mapping_categories"][0]["id"] == "a1"
+    assert tables["mapping_categories"][0]["name"] == "Rates"
+    assert json.loads(tables["mapping_categories"][0]["meta"]) == {"region": "EU"}
+    assert tables["trayport_trades_xcap"][0]["qty"] == 12
+    assert len(tables["mapping_categories"]) == 1
+    assert len(tables["trayport_trades_xcap"]) == 1
+
+
+def test_plan_builder_keeps_shop_flatten_and_copies_extra_mongo_collections():
+    from app.services.migration.plan_builder import build_plan
+
+    schema = {
+        "entities": [
+            {
+                "name": "customers",
+                "columns": [{"name": "name", "data_type": "string"}],
+                "nesting": [{"path": "orders", "type": "array"}, {"path": "orders.items", "type": "array"}],
+            },
+            {"name": "mapping_categories", "columns": [{"name": "name", "data_type": "string"}], "nesting": []},
+        ]
+    }
+    plan = build_plan(schema, "mongodb", "mysql", "mix")
+    tables = [spec["table"] for spec in plan["flatten"]]
+    assert tables[:3] == ["customers", "orders", "order_items"]
+    assert "mapping_categories" in tables
+
+
+def test_plan_builder_mysql_to_mongo_copies_non_shop_tables():
+    from app.services.migration.plan_builder import build_plan, collections_to_read
+
+    schema = {
+        "entities": [
+            {"name": "mapping_categories", "columns": [{"name": "id"}, {"name": "name"}]},
+            {"name": "role_permissions", "columns": [{"name": "id"}, {"name": "role"}]},
+        ]
+    }
+    plan = build_plan(schema, "mysql", "mongodb", "p")
+    assert plan["direction"] == "relational_to_document"
+    assert collections_to_read(plan) == ["mapping_categories", "role_permissions"]
+    assert len(plan["model_trees"]) == 2
+
+
+def test_batch_executor_writes_every_mongo_collection():
+    from app.jobs import JobStatus, get_job_status
+    from app.services.migration.batch_executor import BatchExecutor
+    from app.services.migration.plan_builder import build_plan
+    from app.services.migration.transformer import Transformer
+
+    class DictConnector:
+        def __init__(self, data):
+            self.data = data
+
+        def estimate_counts(self):
+            return {name: len(rows) for name, rows in self.data.items()}
+
+        def fetch_batch(self, name, offset, limit):
+            return list(self.data.get(name, [])[offset:offset + limit])
+
+    schema = {
+        "entities": [
+            {"name": "mapping_categories", "columns": [{"name": "_id"}, {"name": "name"}], "nesting": []},
+            {"name": "role_permissions", "columns": [{"name": "_id"}, {"name": "role"}], "nesting": []},
+        ]
+    }
+    plan = build_plan(schema, "mongodb", "mysql", "job-any")
+    writer = _FakeWriter()
+    result = BatchExecutor.run(
+        "job-any-collections",
+        DictConnector({
+            "mapping_categories": [{"_id": "1", "name": "A"}],
+            "role_permissions": [{"_id": "2", "role": "admin"}, {"_id": "3", "role": "user"}],
+        }),
+        writer,
+        Transformer(plan),
+        plan,
+        batch_size=1000,
+    )
+    written = {entity: rows for entity, rows in writer.writes}
+    assert set(written) == {"mapping_categories", "role_permissions"}
+    assert written["mapping_categories"][0]["id"] == "1"
+    assert len(written["role_permissions"]) == 2
+    assert result["batches_failed"] == 0
+    assert get_job_status("job-any-collections")["status"] == JobStatus.DONE
+
+
 def test_writer_factory_returns_mysql_writer():
     """WriterFactory.get_writer('mysql', dsn) returns a MySQLWriter instance."""
     writer = WriterFactory.get_writer("mysql", "mysql+pymysql://user:pass@localhost:3306/testdb")

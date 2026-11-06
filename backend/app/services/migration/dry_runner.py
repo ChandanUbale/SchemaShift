@@ -194,7 +194,7 @@ def _try_transform(source_data: Any, transformer, plan: dict[str, Any]) -> dict[
         docs = source_data if isinstance(source_data, list) else next(iter(source_data.values()), [])
         try:
             transformer.transform_batch(
-                source_data if isinstance(source_data, dict) else {"customers": docs},
+                source_data if isinstance(source_data, dict) else {"customers": source_data},
                 direction,
             )
             return None
