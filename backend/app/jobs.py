@@ -30,6 +30,12 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+def status_text(status: Any) -> str:
+    """Plain pending|running|done|failed. str(enum) is 'JobStatus.DONE' on Python 3.11+."""
+    value = getattr(status, "value", status)
+    return str(value).split(".")[-1].lower()
+
+
 # ---------------------------------------------------------------------------
 # In-memory progress cache (for SSE; SQLite is the persistent store)
 # ---------------------------------------------------------------------------
@@ -51,7 +57,7 @@ def create_job(db: Session, job_type: str, connection_id: int | None = None) -> 
     _progress_cache[job_id] = {
         "job_id": job_id,
         "job_type": job_type,
-        "status": JobStatus.PENDING,
+        "status": status_text(JobStatus.PENDING),
         "progress_pct": 0,
         "error": None,
     }
@@ -67,7 +73,7 @@ def update_progress(job_id: str, progress_pct: int, status: JobStatus = JobStatu
     """
     if job_id in _progress_cache:
         _progress_cache[job_id].update({
-            "status": status,
+            "status": status_text(status),
             "progress_pct": progress_pct,
             "error": error,
         })
@@ -152,7 +158,7 @@ async def sse_generator(job_id: str) -> AsyncGenerator[str, None]:
             })
             yield f"data: {data}\n\n"
 
-        if snapshot["status"] in _TERMINAL_STATUSES:
+        if status_text(snapshot["status"]) in {JobStatus.DONE.value, JobStatus.FAILED.value}:
             yield "event: done\ndata: {}\n\n"
             return
 

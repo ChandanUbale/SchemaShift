@@ -40,6 +40,7 @@ class MigrationProgressResponse(BaseModel):
     batches_done: int
     batches_total: int | None
     error: str | None = None
+    audit_log: list = []
 
 
 class CleanupRequest(BaseModel):

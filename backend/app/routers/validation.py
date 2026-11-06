@@ -249,4 +249,10 @@ def download_html_report(migration_job_id: str, db: Session = Depends(get_db)):
         html = (details.get("report") or {}).get("html")
     if not html:
         raise HTTPException(status_code=404, detail="HTML report not found")
+    if "Back to SchemaShift" not in html:
+        html = html.replace(
+            "<body>",
+            '<body><p><a href="javascript:history.back()">← Back to SchemaShift</a></p>',
+            1,
+        )
     return HTMLResponse(content=html)

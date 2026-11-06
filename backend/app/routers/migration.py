@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.jobs import JobStatus, _progress_cache, create_job, get_job_status, update_progress
+from app.jobs import JobStatus, _progress_cache, create_job, get_job_status, status_text, update_progress
 from app.models.connection import Connection
 from app.models.migration import MigrationJob
 from app.models.profiling import ProfilingJob
@@ -342,11 +342,12 @@ def read_job_status(job_id: str, db: Session = Depends(get_db)):
         pct = job_row.progress_pct if job_row else 0
     return MigrationProgressResponse(
         job_id=job_id,
-        status=str(status),
+        status=status_text(status),
         progress_pct=float(pct or 0),
         batches_done=job_row.batches_done if job_row else 0,
         batches_total=job_row.batches_total if job_row else None,
         error=(cache or {}).get("error") if cache else (job_row.error if job_row else None),
+        audit_log=(cache or {}).get("audit_log") or (job_row.audit_log if job_row else []) or [],
     )
 
 

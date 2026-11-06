@@ -6,6 +6,7 @@ Stretch/future: add PostgreSQLConnector, SQLServerConnector — no redesign requ
 """
 
 from app.services.discovery.base_connector import BaseConnector
+from app.services.discovery.dsn import resolve_dsn
 from app.services.discovery.mysql_connector import MySQLConnector
 from app.services.discovery.mongodb_connector import MongoDBConnector
 
@@ -46,7 +47,7 @@ class ConnectorFactory:
                 f"MVP supports: {supported}."
             )
         # MongoDB needs db_name separately; pass through kwargs
-        return connector_cls(dsn, **kwargs)
+        return connector_cls(resolve_dsn(dsn), **kwargs)
 
     @classmethod
     def supported_types(cls) -> list[str]:
