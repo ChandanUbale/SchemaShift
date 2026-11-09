@@ -203,7 +203,9 @@ export default function Step1Connect() {
               onChange={(e) => updateSourceDsn(e.target.value)}
             />
           </div>
-          <p className="hint">Use an account permitted to list databases and read source metadata.</p>
+          <p className="hint">
+            Use an account permitted to list databases and read source metadata. When SchemaShift runs in Docker, <code>localhost</code> points to its bundled database; use <code>host.docker.internal</code> to reach a database installed on this Windows host.
+          </p>
           <div className="field-row">
             <button type="button" className="btn" disabled={busy || !store.sourceDsn.trim()} onClick={() => void discoverSourceDatabases()}>
               {busyAction === 'discover-source' ? 'Discovering…' : 'Discover databases'}
@@ -247,7 +249,9 @@ export default function Step1Connect() {
                 id="target-dsn"
                 type="text"
                 disabled={busy}
-                placeholder={store.targetType === 'mysql' ? 'mysql+pymysql://user:password@host:3306' : 'mongodb://user:password@host:27017'}
+                placeholder={store.targetType === 'mysql'
+                  ? `mysql+pymysql://user:password@host:${import.meta.env.VITE_MYSQL_HOST_PORT || '3306'}`
+                  : `mongodb://user:password@host:${import.meta.env.VITE_MONGO_HOST_PORT || '27017'}`}
                 value={store.targetDsn}
                 onChange={(e) => updateTargetDsn(e.target.value)}
               />
