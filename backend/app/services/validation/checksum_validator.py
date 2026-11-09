@@ -22,15 +22,9 @@ class ChecksumValidator:
 
     @staticmethod
     def _compare_payload(row: dict[str, Any]) -> dict[str, Any]:
-        """
-        Nested Mongo vs flat MySQL: hash root customer fields only (name, email)
-        so the demo comparison can pass. Other rows hash scalar fields.
-        """
-        if "name" in row or "email" in row:
-            return {"name": row.get("name"), "email": row.get("email")}
         return {
             k: v for k, v in row.items()
-            if k not in ("_id", "id") and not isinstance(v, (list, dict))
+            if k not in ("_id", "id")
         }
 
     @staticmethod
@@ -58,5 +52,5 @@ class ChecksumValidator:
             "matched": matched,
             "summary": f"{matched}/{checked}" if checked else "0/0",
             "mismatched_pks": mismatched,
-            "note": "Root customer fields only (name, email) when present so nested Mongo vs flat MySQL can match.",
+            "note": "Compares all sample fields except source/target identifiers.",
         }

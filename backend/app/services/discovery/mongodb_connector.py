@@ -54,6 +54,15 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _direct_child_names(seen: dict[str, int], path: str) -> set[str]:
+    prefix = f"{path}."
+    return {
+        name[len(prefix):].split(".", 1)[0]
+        for name in seen
+        if name.startswith(prefix) and name[len(prefix):]
+    }
+
+
 def walk_doc(
     doc: dict[str, Any],
     prefix: str,
@@ -72,8 +81,9 @@ def walk_doc(
             continue
         types.setdefault(path, set()).add(_type_of(value))
         if isinstance(value, dict):
+            nesting.add(path)
             walk_doc(value, path, types, nulls, seen, nesting)
-        elif isinstance(value, list) and any(isinstance(item, dict) for item in value):
+        elif isinstance(value, list):
             nesting.add(path)
             for item in value:
                 if isinstance(item, dict):
@@ -141,7 +151,14 @@ class MongoDBConnector(BaseConnector):
             "columns": columns,
             "indexes": [],
             "foreign_keys": [],
-            "nesting": [{"path": p, "type": "array"} for p in sorted(nesting)],
+            "nesting": [
+                {
+                    "path": path,
+                    "type": "array" if "array" in types.get(path, set()) else "object",
+                    "child_count": len(_direct_child_names(seen, path)),
+                }
+                for path in sorted(nesting)
+            ],
         }
 
     def fetch_sample(self, entity_name: str, n: int) -> list[dict[str, Any]]:

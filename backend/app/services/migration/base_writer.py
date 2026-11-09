@@ -5,7 +5,7 @@ MVP implements: MySQLWriter, MongoWriter.
 Stretch/future: PostgreSQLWriter — same interface, no redesign.
 
 Writers are the ONLY components allowed to write to the target database.
-They must never be called from discovery, profiling, recommendation, or dry_runner.
+They must never be called from discovery, dry-run, or validation.
 """
 
 from abc import ABC, abstractmethod

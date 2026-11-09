@@ -10,11 +10,6 @@ SOURCE_CLEANUP_FORBIDDEN = "Cleanup must not drop the source"
 DRY_RUN_HAS_NO_TARGET = "Dry-run jobs have no target to clean up"
 TARGET_MISMATCH = "target_connection_id does not match this job"
 
-_SHOP_MYSQL = ("order_items", "orders", "customers")
-_SHOP_MONGO = ("customers",)
-_MYSQL_DROP_RANK = {"order_items": 0, "orders": 1, "customers": 2}
-
-
 def entities_from_audit(audit_log: list[dict] | None, target_type: str) -> list[str]:
     """Unique entity names from the job audit log, children first for MySQL FKs."""
     names: list[str] = []
@@ -25,10 +20,6 @@ def entities_from_audit(audit_log: list[dict] | None, target_type: str) -> list[
             continue
         seen.add(entity)
         names.append(entity)
-    if not names:
-        names = list(_SHOP_MONGO if (target_type or "").lower() == "mongodb" else _SHOP_MYSQL)
-    if (target_type or "").lower() == "mysql":
-        names.sort(key=lambda name: _MYSQL_DROP_RANK.get(name, 50))
     return names
 
 
@@ -45,10 +36,10 @@ def require_cleanup_allowed(job: Any, target_connection_id: int) -> None:
         raise ValueError(TARGET_MISMATCH)
 
 
-def seed_writer_for_cleanup(writer, entities: list[str]) -> None:
+def restore_writer_entities_from_audit(writer, entities: list[str]) -> None:
     """
     Fresh writer instances have empty in-memory tracking sets.
-    Fill them from the job audit log so writer.cleanup(job_id) drops the right entities.
+    Restore them from the job audit log so writer.cleanup(job_id) drops the right entities.
     """
     if hasattr(writer, "_created_tables"):
         if getattr(writer, "_conn", None) is None and hasattr(writer, "_get_connection"):

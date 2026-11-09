@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ── Backend ─────────────────────────────────────────────────────────────────
   backend:
@@ -10,18 +8,11 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
-      - DEMO_MYSQL_DSN=mysql+pymysql://root:root@mysql-source:3306/demo
-      - TARGET_MYSQL_DSN=mysql+pymysql://root:root@mysql-target:3306/migration_target
-      - DEMO_MONGO_SRC_URI=mongodb://mongo:27017/demo_source
-      - TARGET_MONGO_URI=mongodb://mongo:27017
-      - TARGET_MONGO_DB=migration_target
       - DOCKER_DSN_REWRITE=true
     volumes:
       - ./backend:/app
     depends_on:
-      mysql-source:
-        condition: service_healthy
-      mysql-target:
+      mysql:
         condition: service_healthy
       mongo:
         condition: service_started
@@ -42,47 +33,25 @@ services:
     networks:
       - schemashift
 
-  # ── MySQL source (seeded demo data) ─────────────────────────────────────────
-  mysql-source:
+  # ── Shared MySQL instance; source and target are selected by database name ──
+  mysql:
     image: mysql:8
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: demo
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
     ports:
       - "3306:3306"
     volumes:
-      - ./seed/sample_mysql_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
-      - ./seed/sample_mysql_data.sql:/docker-entrypoint-initdb.d/02_data.sql
-      - mysql_source_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
       - schemashift
 
-  # ── MySQL target (empty, migration writes here) ──────────────────────────────
-  mysql-target:
-    image: mysql:8
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: migration_target
-    ports:
-      - "3307:3306"
-    volumes:
-      - mysql_target_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - schemashift
-
-  # ── MongoDB (demo_source + migration_target databases) ───────────────────────
+  # ── Shared MongoDB instance; databases/collections are user-provided ────────
   mongo:
     image: mongo:7
     restart: unless-stopped
@@ -104,8 +73,7 @@ services:
   #     - schemashift
 
 volumes:
-  mysql_source_data:
-  mysql_target_data:
+  mysql_data:
   mongo_data:
   # ollama_data:
 

@@ -9,39 +9,7 @@ from collections import Counter
 from datetime import date, datetime
 from typing import Any
 
-from app.services.profiling.quality_checker import QualityChecker
-
-_REQUIRED = {
-    "customers": ("name", "email"),
-    "order_items": ("quantity",),
-    "items": ("quantity",),
-}
-
-_REL_ORPHANS = (
-    ("orders", "customer_id", "customers"),
-    ("order_items", "order_id", "orders"),
-)
-
-
-def default_plan(source_type: str, plan_id: str | None = None) -> dict[str, Any]:
-    """Shop fixture plan when recommendation_plans is not available yet."""
-    if (source_type or "").lower() == "mongodb":
-        return {
-            "plan_id": plan_id,
-            "direction": "document_to_relational",
-            "target_type": "mysql",
-            "flatten": [
-                {"table": "customers", "from_path": "$"},
-                {"table": "orders", "from_path": "$.orders", "parent_fk": "customer_id"},
-                {"table": "order_items", "from_path": "$.orders.items", "parent_fk": "order_id"},
-            ],
-        }
-    return {
-        "plan_id": plan_id,
-        "direction": "relational_to_document",
-        "target_type": "mongodb",
-    }
-
+from app.services.migration.quality_checks import QualityChecker
 
 def _issue(table: str, issue_type: str, row_count: int, description: str) -> dict[str, Any] | None:
     if row_count <= 0:
@@ -95,42 +63,22 @@ def _date_values(rows: list[dict[str, Any]]) -> list[Any]:
     return values
 
 
-def _explode_documents(docs: list[dict[str, Any]]) -> dict[str, list[dict]]:
-    customers: list[dict] = []
-    orders: list[dict] = []
-    items: list[dict] = []
-    for doc in docs:
-        if not isinstance(doc, dict):
-            continue
-        customers.append(doc)
-        for order in doc.get("orders") or []:
-            if not isinstance(order, dict):
-                continue
-            orders.append(order)
-            for item in order.get("items") or []:
-                if isinstance(item, dict):
-                    items.append(item)
-    return {"customers": customers, "orders": orders, "order_items": items}
-
-
-def _as_tables(source_data: Any, direction: str) -> dict[str, list[dict]]:
+def _as_tables(source_data: Any, direction: str, plan: dict[str, Any]) -> dict[str, list[dict]]:
     if isinstance(source_data, dict):
-        values = {key: list(rows or []) for key, rows in source_data.items()}
-        if direction == "document_to_relational" and len(values) == 1:
-            only = next(iter(values.values()))
-            if only and isinstance(only[0], dict) and isinstance(only[0].get("orders"), list):
-                return _explode_documents(only)
-        return values
+        return {key: list(rows or []) for key, rows in source_data.items()}
     if isinstance(source_data, list):
-        if direction == "document_to_relational" or (
-            source_data and isinstance(source_data[0], dict) and isinstance(source_data[0].get("orders"), list)
-        ):
-            return _explode_documents(source_data)
-        return {"customers": source_data}
+        if direction == "document_to_relational":
+            flatten = plan.get("flatten") or []
+            collection = next((spec.get("collection") for spec in flatten if spec.get("collection")), None)
+        else:
+            tree = plan.get("model_tree") or {}
+            collection = tree.get("from_table") or tree.get("collection")
+        if collection:
+            return {collection: source_data}
     return {}
 
 
-def _scan_table(name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _scan_table(name: str, rows: list[dict[str, Any]], required_fields: list[str]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     if not rows:
         return issues
@@ -158,7 +106,7 @@ def _scan_table(name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if found:
         issues.append(found)
 
-    for field in _REQUIRED.get(name, ()):
+    for field in required_fields:
         missing = sum(1 for row in rows if row.get(field) is None)
         found = _issue(
             name, "missing_field", missing,
@@ -169,11 +117,18 @@ def _scan_table(name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return issues
 
 
-def _scan_orphans(tables: dict[str, list[dict]]) -> list[dict[str, Any]]:
+def _scan_orphans(tables: dict[str, list[dict]], foreign_keys: list[dict[str, str]]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    for child, fk_field, parent in _REL_ORPHANS:
+    for fk in foreign_keys:
+        child = fk["child_table"]
+        fk_field = fk["fk_field"]
+        parent = fk["parent_table"]
         child_rows = tables.get(child) or []
-        parent_ids = {_pk(row) for row in tables.get(parent) or [] if _pk(row) is not None}
+        pk_field = fk.get("pk_field") or "id"
+        parent_ids = {
+            row.get(pk_field) for row in tables.get(parent) or []
+            if row.get(pk_field) is not None
+        }
         orphans = QualityChecker.detect_orphan_fks(child_rows, fk_field, parent_ids)
         found = _issue(
             child, "orphan_fk", orphans,
@@ -185,24 +140,12 @@ def _scan_orphans(tables: dict[str, list[dict]]) -> list[dict[str, Any]]:
 
 
 def _try_transform(source_data: Any, transformer, plan: dict[str, Any]) -> dict[str, Any] | None:
-    direction = plan.get("direction") or "relational_to_document"
+    direction = plan.get("direction")
+    if not direction:
+        return _issue("transform", "transform_error", 1, "Migration plan is missing its direction")
     try:
-        if direction == "relational_to_document":
-            tables = source_data if isinstance(source_data, dict) else {"customers": source_data}
-            transformer.transform_batch(tables, direction)
-            return None
-        docs = source_data if isinstance(source_data, list) else next(iter(source_data.values()), [])
-        try:
-            transformer.transform_batch(
-                source_data if isinstance(source_data, dict) else {"customers": source_data},
-                direction,
-            )
-            return None
-        except (NotImplementedError, ValueError):
-            for doc in docs or []:
-                if isinstance(doc, dict):
-                    transformer.transform_row(doc, direction)
-            return None
+        transformer.transform_batch(_as_tables(source_data, direction, plan), direction)
+        return None
     except NotImplementedError:
         return None
     except TypeError as exc:
@@ -230,12 +173,13 @@ class DryRunner:
             document_to_relational → list[dict] documents (or {collection: docs})
         """
         plan = plan or {}
-        direction = plan.get("direction") or "relational_to_document"
-        tables = _as_tables(source_data, direction)
+        direction = plan.get("direction") or ""
+        tables = _as_tables(source_data, direction, plan)
         issues: list[dict[str, Any]] = []
         for name, rows in tables.items():
-            issues.extend(_scan_table(name, rows))
-        issues.extend(_scan_orphans(tables))
+            required_fields = (plan.get("source_required_fields") or {}).get(name, [])
+            issues.extend(_scan_table(name, rows, required_fields))
+        issues.extend(_scan_orphans(tables, plan.get("source_foreign_keys") or []))
         transform_issue = _try_transform(source_data, transformer, plan)
         if transform_issue:
             issues.append(transform_issue)

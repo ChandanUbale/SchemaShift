@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { EngineType, Workload } from '../store/migrationStore';
+import type { EngineType } from '../store/migrationStore';
 
 const envUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '');
 const baseURL = envUrl
@@ -59,6 +59,16 @@ export async function testConnection(id: number) {
   return data as { success: boolean; message: string; latency_ms: number | null };
 }
 
+export async function discoverDatabases(sourceType: EngineType, dsn: string) {
+  const { data } = await api.post('/connections/databases', { source_type: sourceType, dsn });
+  return data as { databases: string[] };
+}
+
+export async function inspectConnection(id: number) {
+  const { data } = await api.post(`/connections/${id}/inspect`);
+  return data as { database: string; entities: string[] };
+}
+
 export async function discover(connectionId: number) {
   const { data } = await api.post(`/discovery/${connectionId}/discover`);
   return data;
@@ -69,76 +79,12 @@ export async function getRelationships(connectionId: number) {
   return data as { nodes: any[]; edges: any[] };
 }
 
-export async function startProfiling(connectionId: number, sampleSize = 10000) {
-  const { data } = await api.post('/profiling/', { connection_id: connectionId, sample_size: sampleSize });
-  return data as { job_id: string };
-}
-
-export async function getProfiling(jobId: string) {
-  const { data } = await api.get(`/profiling/${jobId}`);
-  return data;
-}
-
-export async function recommend(connectionId: number, workload: Workload) {
-  try {
-    const { data } = await api.post('/recommendation/', { connection_id: connectionId, workload });
-    return data;
-  } catch {
-    return fallbackRecommendation(workload);
-  }
-}
-
-export function fallbackRecommendation(workload: Workload) {
-  const documentScore =
-    30 +
-    (workload.mostly_reads ? 20 : 0) +
-    (workload.nested_together_access ? 24 : 0) +
-    (workload.analytical_aggregations ? 8 : 0);
-  const relationalScore =
-    10 +
-    (workload.frequent_joins ? 25 : 0) +
-    (workload.transactional_writes ? 20 : 0);
-  const documentWins = documentScore >= relationalScore;
-  const confidence = Math.min(95, Math.max(55, Math.abs(documentScore - relationalScore) + 60));
-  return {
-    recommended_model: documentWins ? 'document' : 'relational',
-    target_type: documentWins ? 'mongodb' : 'mysql',
-    confidence,
-    plan_id: crypto.randomUUID(),
-    reasons: [
-      { code: 'customer_reads', message: 'Customer aggregate read frequency', weight: documentWins ? 28 : 8 },
-      { code: 'orders_items', message: 'Orders and items accessed together', weight: documentWins ? 24 : 6 },
-      { code: 'item_fanout', message: 'Item fan-out is bounded', weight: 18 },
-      { code: 'products_reuse', message: 'Products reused across orders', weight: 11 },
-      { code: 'analytics', message: 'Cross-customer analytics', weight: 8 },
-    ],
-    ai_explanation: null,
-    generated_ddl: documentWins
-      ? null
-      : `CREATE TABLE customers (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  name VARCHAR(255),\n  email VARCHAR(255),\n  created_at DATETIME\n);\nCREATE TABLE orders (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  customer_id INT,\n  order_date DATETIME,\n  total DECIMAL(10,2),\n  status VARCHAR(32)\n);\nCREATE TABLE order_items (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  order_id INT,\n  product_id INT,\n  product_name VARCHAR(255),\n  quantity INT,\n  price DECIMAL(10,2)\n);`,
-    model_tree: documentWins
-      ? {
-          collection: 'customers',
-          fields: ['_id', 'name', 'email', 'created_at'],
-          embed: [
-            {
-              as: 'orders',
-              fields: ['id', 'order_date', 'total', 'status'],
-              embed: [{ as: 'items', fields: ['product_id', 'product_name', 'quantity', 'price'] }],
-            },
-          ],
-        }
-      : null,
-    fallback: true,
-  };
-}
-
-export async function startDryRun(sourceConnectionId: number, planId: string) {
+export async function startDryRun(sourceConnectionId: number, entityNames?: string[]) {
   const { data } = await api.post('/migration/dry-run', {
     source_connection_id: sourceConnectionId,
-    plan_id: planId,
+    entity_names: entityNames,
   });
-  return data as { job_id: string };
+  return data as { job_id: string; plan_id: string };
 }
 
 export async function getMigrationStatus(jobId: string) {
@@ -156,9 +102,9 @@ export async function executeMigration(payload: {
   plan_id: string;
   source_connection_id: number;
   target_connection_id: number;
-  override_recommendation?: EngineType | null;
+  entity_names?: string[];
+  target_collection_name?: string;
   in_place_optimisation: boolean;
-  confirm_high_risk: boolean;
 }) {
   const { data } = await api.post('/migration/execute', payload);
   return data as { job_id: string };
@@ -172,6 +118,7 @@ export async function startValidation(payload: {
   migration_job_id: string;
   source_connection_id: number;
   target_connection_id: number;
+  entity_names?: string[];
 }) {
   const { data } = await api.post('/validation/', payload);
   return data as { job_id: string };

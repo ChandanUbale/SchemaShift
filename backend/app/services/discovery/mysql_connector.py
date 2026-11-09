@@ -3,7 +3,7 @@ services/discovery/mysql_connector.py — MySQL source connector.
 
 Driver: pymysql (MIT license)
 Reads INFORMATION_SCHEMA for schema discovery.
-Uses LIMIT for sampling (configurable via PROFILE_SAMPLE_SIZE).
+Uses LIMIT for bounded dry-run sampling.
 """
 
 from typing import Any
@@ -108,7 +108,7 @@ class MySQLConnector(BaseConnector):
 
             # Foreign Keys
             cursor.execute("""
-                SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+                SELECT COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_NAME = %s
@@ -117,6 +117,7 @@ class MySQLConnector(BaseConnector):
             for row in cursor.fetchall():
                 schema["foreign_keys"].append({
                     "column": row["COLUMN_NAME"],
+                    "ref_database": row["REFERENCED_TABLE_SCHEMA"],
                     "ref_table": row["REFERENCED_TABLE_NAME"],
                     "ref_column": row["REFERENCED_COLUMN_NAME"]
                 })

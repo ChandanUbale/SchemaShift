@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import Base, engine
-from app.routers import connections, discovery, migration, profiling, recommendation, validation
+from app.routers import connections, discovery, migration, validation
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ app.add_middleware(
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,8 +67,6 @@ app.add_middleware(
 
 app.include_router(connections.router,    prefix="/api/connections",    tags=["connections"])
 app.include_router(discovery.router,      prefix="/api/discovery",      tags=["discovery"])
-app.include_router(profiling.router,      prefix="/api/profiling",      tags=["profiling"])
-app.include_router(recommendation.router, prefix="/api/recommendation", tags=["recommendation"])
 app.include_router(migration.router,      prefix="/api/migration",      tags=["migration"])
 app.include_router(validation.router,     prefix="/api/validation",     tags=["validation"])
 

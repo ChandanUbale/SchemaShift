@@ -2,7 +2,7 @@
 
 > We don't simply copy data from one database to another.
 >
-> We inspect the source, understand its data and workload, recommend whether a **relational or document** model is more appropriate, show the generated target model, let the user **approve or override**, dry-run the migration **without writing**, migrate in batches, and **prove** the result with validation (counts, aggregates, samples) — separate from the source data-quality risk score.
+> Connect to a source, discover its schema, choose entities, rehearse the migration without writing, migrate in batches, and validate the result.
 
 **MVP databases:** MySQL (relational) ↔ MongoDB (document), both directions.
 
@@ -16,8 +16,6 @@
 | Git | 2.x |
 | Python | 3.12.x *(local dev only)* |
 | Node.js | 20 LTS *(local dev only)* |
-
-No Gemini / OpenAI key is required. Ollama is **optional** — leave `USE_LOCAL_LLM=false`.
 
 ---
 
@@ -38,9 +36,10 @@ Services after a successful start:
 |---|---|
 | http://localhost:8000/docs | FastAPI OpenAPI explorer |
 | http://localhost:5173 | React wizard UI |
-| localhost:3306 | MySQL **source** (seeded with demo data) |
-| localhost:3307 | MySQL **target** (empty — migration writes here) |
-| localhost:27017 | MongoDB (`demo_source` + `migration_target`) |
+| localhost:3306 | One shared MySQL instance; select existing source and target databases in the UI |
+| localhost:27017 | One shared MongoDB instance; select existing databases/collections in the UI |
+
+No sample databases or records are loaded. If omitted, the target database name defaults to the selected source database. A missing MySQL target database is created during target connection, so the target account needs permission to create databases. MongoDB creates its target database when migration first creates/writes a collection. Use different source and target databases.
 
 ```bash
 # Run backend tests inside the container
@@ -81,20 +80,13 @@ npm run dev          # Vite dev server → http://localhost:5173
 
 ---
 
-## Demo Flow (5–7 min)
+## Migration Flow
 
-1. **Connect** — paste the MySQL source connection string
-2. **Discover** — browse tables, columns, FK graph
-3. **Profile** — view null rates, duplicates, orphan FKs, data volume
-4. **Recommend** — rule engine scores relational vs document; shows confidence and reasons
-5. **Model preview** — inspect generated MySQL DDL or nested MongoDB document shape
-6. **Dry run** — see issues (invalid dates, orphans, duplicate keys) before any write
-7. **Approve** — confirm (extra confirmation when profiling risk is High)
-8. **Migrate** — batch progress via SSE; retry on failure; audit log
-9. **Validate** — counts, aggregates, sample/checksum, relationship checks
-10. **Final report** — quality before vs correctness after, downloadable JSON
-
-*(Optional step 11: reconnect to MongoDB source → recommend relational → MySQL)*
+1. **Connect** — choose MySQL or MongoDB, enter a connection string, discover and select the source database, then connect and inspect the target
+2. **Discover** — review entity-specific relationship graphs and select all or specific tables/collections
+3. **Dry run** — generate a plan from the discovered schema and review sample transformation issues; no writes
+4. **Migrate** — approve and start batch migration; progress and audit log are shown
+5. **Validate** — compare selected source and target counts, aggregates, samples, and relationships
 
 ---
 
@@ -104,13 +96,9 @@ See [`.env.example`](.env.example) for the full list. Key variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DEMO_MYSQL_DSN` | *(compose override)* | MySQL source DSN |
-| `TARGET_MYSQL_DSN` | *(compose override)* | MySQL target DSN |
-| `DEMO_MONGO_SRC_URI` | *(compose override)* | MongoDB source URI |
+| `MYSQL_ROOT_PASSWORD` | `root` for local Compose | Password for the local MySQL service |
 | `BATCH_SIZE` | `1000` | Rows/docs per migration batch |
-| `PROFILE_SAMPLE_SIZE` | `10000` | Max rows sampled for profiling |
-| `USE_LOCAL_LLM` | `false` | Enable optional Ollama explanation |
-| `OLLAMA_MODEL` | *(empty)* | Model tag to pull (e.g. `llama3`) |
+| `DRY_RUN_SAMPLE_SIZE` | `10000` | Max rows/docs sampled during dry run |
 
 ---
 
@@ -123,7 +111,6 @@ schemashift/
 ├── README.md
 ├── backend/          # FastAPI + Python 3.12
 ├── frontend/         # React 18 + Vite
-└── seed/             # Demo SQL + JSON data
 ```
 
 See [`docs/TechStack_and_Scaffolding 2.md`](docs/TechStack_and_Scaffolding%202.md) for the full architecture.
@@ -135,5 +122,4 @@ See [`docs/TechStack_and_Scaffolding 2.md`](docs/TechStack_and_Scaffolding%202.m
 - PostgreSQL, SQL Server, Parquet
 - Celery, Redis, distributed job queue
 - Automatic rollback / CDC
-- Mandatory Ollama or any cloud LLM
 - Multi-user auth, encrypted secrets, production deployment

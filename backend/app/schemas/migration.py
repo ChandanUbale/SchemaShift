@@ -1,12 +1,11 @@
 """schemas/migration.py — Pydantic API contracts for dry-run, execute, and progress."""
 
-from pydantic import BaseModel
-from typing import Literal
+from pydantic import BaseModel, Field
 
 
 class DryRunRequest(BaseModel):
     source_connection_id: int
-    plan_id: str  # from recommendation
+    entity_names: list[str] | None = None
 
 
 class DryRunIssue(BaseModel):
@@ -18,6 +17,7 @@ class DryRunIssue(BaseModel):
 
 class DryRunResult(BaseModel):
     job_id: str
+    plan_id: str | None = None
     issues: list[DryRunIssue] = []
     total_issues: int = 0
     sample_size: int = 0
@@ -28,9 +28,9 @@ class MigrationApproveRequest(BaseModel):
     plan_id: str
     source_connection_id: int
     target_connection_id: int
-    override_recommendation: Literal["mysql", "mongodb"] | None = None  # manual override
+    entity_names: list[str] | None = None
+    target_collection_name: str | None = Field(default=None, max_length=120)
     in_place_optimisation: bool = False  # must be explicit
-    confirm_high_risk: bool = False
 
 
 class MigrationProgressResponse(BaseModel):

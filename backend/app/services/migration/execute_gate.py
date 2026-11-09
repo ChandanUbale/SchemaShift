@@ -7,10 +7,7 @@ Does not write to any target.
 
 from typing import Any
 
-from app.services.migration.plan_builder import shop_plan
-
 DRY_RUN_REQUIRED = "Run dry-run before execute"
-HIGH_RISK_REQUIRED = "Profiling risk is High. Set confirm_high_risk=true to proceed."
 PLAN_REQUIRED = "plan_id does not exist"
 
 
@@ -28,19 +25,21 @@ def require_successful_dry_run(job: Any) -> None:
         raise ValueError(DRY_RUN_REQUIRED)
 
 
-def require_high_risk_confirm(risk_label: str | None, confirm_high_risk: bool) -> None:
-    if risk_label is None:
-        return
-    if str(risk_label).lower() == "high" and not confirm_high_risk:
-        raise ValueError(HIGH_RISK_REQUIRED)
+def apply_target_collection(plan: dict[str, Any], collection_name: str | None) -> dict[str, Any]:
+    """Rename the primary MongoDB output collection when the user requested one."""
+    name = (collection_name or "").strip()
+    if not name or (plan or {}).get("target_type") != "mongodb":
+        return plan
+    if "\x00" in name or name.startswith("system."):
+        raise ValueError("Choose a valid non-system MongoDB collection name.")
 
-
-def apply_override(plan: dict[str, Any], override: str | None) -> dict[str, Any]:
-    """User override wins for this job only — do not rescore."""
     out = dict(plan)
-    if override in ("mysql", "mongodb") and override != out.get("target_type"):
-        out["target_type"] = override
-        out["direction"] = (
-            "document_to_relational" if override == "mysql" else "relational_to_document"
-        )
+    if out.get("model_tree"):
+        out["model_tree"] = {**out["model_tree"], "collection": name}
+    trees = out.get("model_trees")
+    if trees:
+        out["model_trees"] = [
+            {**tree, "collection": name} if index == 0 else tree
+            for index, tree in enumerate(trees)
+        ]
     return out

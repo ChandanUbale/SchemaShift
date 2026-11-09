@@ -57,7 +57,7 @@ def test_checksum_validator_identical_rows():
     nested = [{"id": 1, "name": "Alice", "email": "a@x.com", "orders": [{"id": 10}]}]
     flat = [{"id": 1, "name": "Alice", "email": "a@x.com"}]
     roundtrip = ChecksumValidator.validate(nested, flat)
-    assert roundtrip["matched"] == 1
+    assert roundtrip["matched"] == 0
 
 
 def test_checksum_validator_mismatched_rows():
@@ -84,50 +84,43 @@ def test_relationship_validator_mysql_orphans_fail():
         "orders": [{"id": 10, "customer_id": 1}, {"id": 11, "customer_id": 999}],
         "order_items": [{"id": 100, "order_id": 10}],
     })
-    result = RelationshipValidator.validate_fk_integrity(conn)
+    result = RelationshipValidator.validate_fk_integrity(conn, fk_map=[
+        {"child_table": "orders", "fk_field": "customer_id", "parent_table": "customers", "pk_field": "id"},
+        {"child_table": "order_items", "fk_field": "order_id", "parent_table": "orders", "pk_field": "id"},
+    ])
     assert result["passed"] is False
     orphans = {item["relationship"]: item["orphan_count"] for item in result["details"]}
     assert any(count == 1 for count in orphans.values())
 
 
-def test_relationship_validator_mongo_embed_passes():
-    conn = _RelConn({
-        "customers": [{"id": 1, "orders": [{"id": 10, "items": []}]}],
-    })
+def test_relationship_validator_without_discovered_relationships_reports_none():
+    conn = _RelConn({"arbitrary_collection": [{"id": 1}]})
     result = RelationshipValidator.validate_fk_integrity(conn, fk_map=[])
     assert result["passed"] is True
-    assert result["details"][0]["status"] == "passed"
+    assert result["details"] == []
 
 
 def test_report_generator_produces_html(tmp_path):
     path = tmp_path / "report.html"
     report = ReportGenerator.generate(
-        {"risk_label": "high", "risk_score": 12.5},
         {"records_migrated": 10, "batches_total": 2, "batches_failed": 0, "duration_seconds": 1.5},
         {"count_match_pct": 99.0, "aggregate_match": True, "sample_matched": "10/10", "relationship_checks": "passed"},
         str(path),
     )
     html = path.read_text(encoding="utf-8")
-    assert "Data quality before" in html
-    assert "high" in html
-    assert "12.5" in html
+    assert "Data quality before" not in html
     assert "Validation after" in html
     assert "99.0" in html
     assert "10/10" in html
     assert report["html_report_path"] == str(path)
-    assert report["before"]["risk_label"] == "high"
     assert report["after"]["count_match_pct"] == 99.0
 
 
-def test_risk_and_validation_are_separate(tmp_path):
-    """Profiling risk score != migration validation result."""
+def test_report_summarizes_migration_and_validation(tmp_path):
     report = ReportGenerator.generate(
-        {"risk_label": "high", "risk_score": 80.0},
         {"records_migrated": 100, "batches_total": 1, "batches_failed": 0, "duration_seconds": 3},
         {"count_match_pct": 99.8, "aggregate_match": True, "sample_matched": "100/100", "relationship_checks": "passed"},
         str(tmp_path / "sep.html"),
     )
-    assert report["before"]["risk_score"] == 80.0
     assert report["after"]["count_match_pct"] == 99.8
-    assert report["before"]["risk_score"] != report["after"]["count_match_pct"]
-    assert "separate" in report["note"].lower()
+    assert report["migration"]["records_migrated"] == 100

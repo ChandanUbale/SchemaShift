@@ -2,12 +2,7 @@
 
 from typing import Any
 
-from app.services.profiling.quality_checker import QualityChecker
-
-_SHOP_FKS = [
-    {"child_table": "orders", "fk_field": "customer_id", "parent_table": "customers", "pk_field": "id"},
-    {"child_table": "order_items", "fk_field": "order_id", "parent_table": "orders", "pk_field": "id"},
-]
+from app.services.migration.quality_checks import QualityChecker
 
 
 class RelationshipValidator:
@@ -19,27 +14,10 @@ class RelationshipValidator:
     ) -> dict[str, Any]:
         """
         MySQL target: count child rows whose parent id is missing.
-        Mongo target: embedding passes if each customer's orders field is an array.
+        Only relationships discovered from the actual source schema are checked.
         """
         details: list[dict[str, Any]] = []
-        fks = list(fk_map) if fk_map is not None else list(_SHOP_FKS)
-
-        if not fks:
-            try:
-                docs = target_connector.fetch_sample("customers", 10_000)
-            except Exception:
-                docs = []
-            bad = sum(
-                1 for doc in docs
-                if "orders" in doc and not isinstance(doc.get("orders"), list)
-            )
-            passed = bad == 0
-            details.append({
-                "relationship": "customers.orders (embedded)",
-                "orphan_count": bad,
-                "status": "passed" if passed else "failed",
-            })
-            return {"passed": passed, "details": details}
+        fks = list(fk_map or [])
 
         for fk in fks:
             child = fk["child_table"]

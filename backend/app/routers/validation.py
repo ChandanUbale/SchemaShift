@@ -12,40 +12,41 @@ from app.database import get_db, SessionLocal
 from app.jobs import JobStatus, create_job, update_progress
 from app.models.connection import Connection
 from app.models.migration import MigrationJob
-from app.models.profiling import ProfilingJob
 from app.models.validation import ValidationReport
 from app.schemas.validation import FinalReport, ValidationRequest, ValidationResult
 from app.services.discovery.connector_factory import ConnectorFactory
 from app.services.validation import run_count_and_aggregate
 from app.services.validation.checksum_validator import ChecksumValidator
-from app.services.validation.relationship_validator import RelationshipValidator, _SHOP_FKS
+from app.services.validation.relationship_validator import RelationshipValidator
 from app.services.validation.report_generator import ReportGenerator
 
 router = APIRouter()
 
-_NUMERIC_FIELDS = {
-    "orders": ["total"],
-    "order_items": ["quantity", "price"],
-}
-
-
-def _numeric_fields(src_counts: dict, tgt_counts: dict) -> dict[str, list[str]]:
-    names = set(src_counts) | set(tgt_counts)
-    return {entity: fields for entity, fields in _NUMERIC_FIELDS.items() if entity in names}
+def _numeric_fields(source_model: Connection, src_counts: dict, tgt_counts: dict) -> dict[str, list[str]]:
+    common = set(src_counts) & set(tgt_counts)
+    numeric_types = {"tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric", "float", "double", "number"}
+    result: dict[str, list[str]] = {}
+    for entity in (source_model.schema_json or {}).get("entities") or []:
+        name = entity.get("name")
+        if name not in common:
+            continue
+        fields = [
+            column["name"] for column in entity.get("columns") or []
+            if column.get("name") and str(column.get("data_type") or "").lower() in numeric_types
+        ]
+        if fields:
+            result[name] = fields
+    return result
 
 
 def _checksum_entity(src_counts: dict, tgt_counts: dict) -> str | None:
-    common = [name for name, count in src_counts.items() if count and tgt_counts.get(name)]
-    if "customers" in common:
-        return "customers"
+    common = sorted(name for name, count in src_counts.items() if count and tgt_counts.get(name))
     return common[0] if common else None
 
 
-def _fk_map(target_model: Connection, tgt_counts: dict) -> list[dict[str, str]]:
-    if target_model.source_type == "mongodb":
-        return []
+def _fk_map(source_model: Connection) -> list[dict[str, str]]:
     fks: list[dict[str, str]] = []
-    for entity in (target_model.schema_json or {}).get("entities") or []:
+    for entity in (source_model.schema_json or {}).get("entities") or []:
         for fk in entity.get("foreign_keys") or []:
             if not fk.get("column") or not fk.get("ref_table"):
                 continue
@@ -55,11 +56,7 @@ def _fk_map(target_model: Connection, tgt_counts: dict) -> list[dict[str, str]]:
                 "parent_table": fk["ref_table"],
                 "pk_field": fk.get("ref_column") or "id",
             })
-    if fks:
-        return fks
-    if {"customers", "orders", "order_items"} <= set(tgt_counts):
-        return list(_SHOP_FKS)
-    return []
+    return fks
 
 
 def _open_connector(conn_model: Connection):
@@ -95,15 +92,6 @@ def _duration_seconds(job: MigrationJob) -> float:
     return 0.0
 
 
-def _latest_profile(db: Session, connection_id: int) -> ProfilingJob | None:
-    return (
-        db.query(ProfilingJob)
-        .filter(ProfilingJob.connection_id == connection_id)
-        .order_by(ProfilingJob.id.desc())
-        .first()
-    )
-
-
 def _to_result(row: ValidationReport) -> ValidationResult:
     return ValidationResult(
         count_match_pct=float(row.count_match_pct or 0),
@@ -135,7 +123,17 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
 
         src_counts = source.estimate_counts() or {}
         tgt_counts = target.estimate_counts() or {}
-        numeric_fields = _numeric_fields(src_counts, tgt_counts)
+        if payload.entity_names is not None:
+            requested = set(payload.entity_names)
+            available = {entity.get("name") for entity in (source_model.schema_json or {}).get("entities", [])}
+            unknown = requested - available
+            if unknown:
+                raise ValueError(f"Unknown source entities: {', '.join(sorted(unknown))}")
+            if not requested:
+                raise ValueError("Select at least one table or collection to validate.")
+            src_counts = {name: count for name, count in src_counts.items() if name in requested}
+            tgt_counts = {name: count for name, count in tgt_counts.items() if name in requested}
+        numeric_fields = _numeric_fields(source_model, src_counts, tgt_counts)
         counts_aggs = run_count_and_aggregate(source, target, numeric_fields)
         update_progress(job_id, 40, JobStatus.RUNNING)
 
@@ -154,7 +152,7 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
         checksum = ChecksumValidator.validate(src_rows, tgt_rows, "id")
         update_progress(job_id, 70, JobStatus.RUNNING)
 
-        fk_map = _fk_map(target_model, tgt_counts)
+        fk_map = [fk for fk in _fk_map(source_model) if fk["child_table"] in src_counts and fk["parent_table"] in src_counts]
         relationships = RelationshipValidator.validate_fk_integrity(target, fk_map)
 
         validation_result = {
@@ -170,11 +168,6 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
             },
         }
 
-        profile = _latest_profile(db, payload.source_connection_id)
-        profiling_result = {
-            "risk_label": (profile.risk_label if profile else None) or "low",
-            "risk_score": float(profile.risk_score if profile and profile.risk_score is not None else 0.0),
-        }
         failed_batches = 0
         if migration.batches_total is not None and migration.batches_done is not None:
             failed_batches = max(int(migration.batches_total) - int(migration.batches_done), 0)
@@ -186,9 +179,7 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
         }
 
         output_path = str(Path(tempfile.gettempdir()) / "schemashift-reports" / f"{job_id}.html")
-        report = ReportGenerator.generate(
-            profiling_result, migration_stats, validation_result, output_path
-        )
+        report = ReportGenerator.generate(migration_stats, validation_result, output_path)
 
         db.add(ValidationReport(
             migration_job_id=migration.id,
@@ -252,21 +243,14 @@ def get_validation_result(migration_job_id: str, db: Session = Depends(get_db)):
 
 @router.get("/{migration_job_id}/report", response_model=FinalReport)
 def get_final_report(migration_job_id: str, db: Session = Depends(get_db)):
-    """Full final report: profiling risk, migration stats, validation correctness."""
+    """Full final report: migration stats and validation correctness."""
     migration, row = _report_row(db, migration_job_id)
-    profile = _latest_profile(db, migration.source_connection_id)
     details = row.details or {}
     report = details.get("report") or {}
-    before = report.get("before") or {}
-    after = report.get("after") or {}
     failed_batches = 0
     if migration.batches_total is not None and migration.batches_done is not None:
         failed_batches = max(int(migration.batches_total) - int(migration.batches_done), 0)
     return FinalReport(
-        risk_label=before.get("risk_label") or (profile.risk_label if profile else None) or "low",
-        risk_score=float(before.get("risk_score") if before.get("risk_score") is not None else (
-            profile.risk_score if profile and profile.risk_score is not None else 0.0
-        )),
         records_migrated=_records_migrated(migration),
         batches_total=int(migration.batches_total or 0),
         batches_failed=failed_batches,

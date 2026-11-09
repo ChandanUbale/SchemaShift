@@ -90,12 +90,12 @@ export default function Step6Migrate() {
     setSavingTarget(true);
     try {
       const saved = await createConnection({
-        name: store.targetName,
+        name: `${store.targetType === 'mysql' ? 'MySQL' : 'MongoDB'} target`,
         source_type: store.targetType || 'mongodb',
         dsn: store.targetDsn,
         is_source: false,
       });
-      store.setTargetConnection(saved.id, saved.source_type, store.targetName, store.targetDsn);
+      store.setTargetConnection(saved.id, saved.source_type, saved.name, store.targetDsn);
     } catch (err) {
       store.setError(apiError(err));
     } finally {
@@ -104,8 +104,8 @@ export default function Step6Migrate() {
   };
 
   const start = async () => {
-    if (!store.sourceConnectionId || !store.targetConnectionId || !store.recommendation?.plan_id) {
-      store.setError('Source, target, and a recommendation plan are required before migrate.');
+    if (!store.sourceConnectionId || !store.targetConnectionId || !store.dryRunPlanId) {
+      store.setError('Source, target, and a completed dry run are required before migration.');
       return;
     }
     store.setError(null);
@@ -113,12 +113,12 @@ export default function Step6Migrate() {
     try {
       const started = await executeMigration({
         job_id: store.dryRunJobId || crypto.randomUUID(),
-        plan_id: store.recommendation.plan_id,
+        plan_id: store.dryRunPlanId,
         source_connection_id: store.sourceConnectionId,
         target_connection_id: store.targetConnectionId,
-        override_recommendation: store.overrideTarget,
+        entity_names: store.selectedEntities.length ? store.selectedEntities : undefined,
+        target_collection_name: store.targetCollectionName,
         in_place_optimisation: store.inPlace,
-        confirm_high_risk: store.confirmHighRisk,
       });
       startedAt.current = Date.now();
       setElapsed(0);
@@ -161,26 +161,22 @@ export default function Step6Migrate() {
       <p className="kicker">Live migration · write stage</p>
       <div className="page-head">
         <h2>{running ? 'Migration is running' : done ? 'Migration finished' : 'Start the approved write'}</h2>
-        <div className="step-count">STEP 6 / 7</div>
+        <div className="step-count">STEP 4 / 5</div>
       </div>
-      <div className={`banner ${running ? 'warn' : done ? 'ok' : ''}`}>
+      <div className={`banner ${running || failed ? 'warn' : done ? 'ok' : ''}`}>
         <div>
-          <strong>This is the only stage that writes.</strong>
-          <div>Approved inserts go to the configured target. The source remains read-only.</div>
+          <strong>{failed ? 'Migration failed. Review the error details below.' : 'This is the only stage that writes.'}</strong>
+          <div>{failed ? 'The source remains read-only. Failed batches include the database reason and attempted row count.' : 'Approved inserts go to the configured target. The source remains read-only.'}</div>
         </div>
-        <b>{running ? 'WRITES ACTIVE' : done ? 'WRITES COMPLETE' : 'WRITES ARMED'}</b>
+        <b>{running ? 'WRITES ACTIVE' : done ? 'WRITES COMPLETE' : failed ? 'MIGRATION FAILED' : 'WRITES ARMED'}</b>
       </div>
       {!store.targetConnectionId && (
-        <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card step6-target-card">
           <h3>Target still needed</h3>
           <p className="hint">Execute requires a saved target connection. Source stays isolated.</p>
           <div className="field">
-            <label>Target name</label>
-            <input value={store.targetName} onChange={(e) => useMigrationStore.setState({ targetName: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>Target connection string</label>
-            <input value={store.targetDsn} onChange={(e) => useMigrationStore.setState({ targetDsn: e.target.value })} />
+            <label htmlFor="step6-target-dsn">Target connection string</label>
+            <input id="step6-target-dsn" value={store.targetDsn} onChange={(e) => useMigrationStore.setState({ targetDsn: e.target.value })} />
           </div>
           <button className="btn primary" disabled={savingTarget} onClick={saveTarget}>
             {savingTarget ? 'Saving…' : 'Save target'}
@@ -193,17 +189,17 @@ export default function Step6Migrate() {
         sourceLabel={`${store.sourceType || 'source'} / ${store.sourceName}`}
         targetLabel={`${store.targetType || 'target'} / ${store.targetName}`}
       />
-      {failed && progress?.error && <div className="error">{progress.error}</div>}
+      {failed && progress?.error && <div className="error"><strong>Failure details:</strong> {progress.error}</div>}
       <div className="actions">
         <button className="btn" onClick={() => store.setStep(5)}>Back</button>
         <div>
           <Tooltip art="readonly" title="Cleanup target" text="Drops this job’s target tables or collections. Never touches the source.">
-            <button className="btn danger" disabled={busy || !store.migrationJobId} onClick={cleanup} style={{ marginRight: 8 }}>
+            <button className="btn danger migration-action-button" disabled={busy || !store.migrationJobId} onClick={cleanup}>
               Cleanup / reset target
             </button>
           </Tooltip>
           <Tooltip art="migrate" title="Start migration" text="This is the only write. Batches go to the approved target.">
-            <button className="btn" disabled={busy || running || !store.targetConnectionId} onClick={start} style={{ marginRight: 8 }}>
+            <button className="btn migration-action-button" disabled={busy || running || !store.targetConnectionId} onClick={start}>
               {busy ? 'Starting…' : store.migrationJobId ? 'Restart migration' : 'Start migration'}
             </button>
           </Tooltip>

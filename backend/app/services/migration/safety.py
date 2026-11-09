@@ -5,7 +5,7 @@ services/migration/safety.py — Validates source vs target connections to preve
 import urllib.parse
 from fastapi import HTTPException
 
-from app.config import settings
+from app.services.discovery.dsn import resolve_dsn
 
 
 def _normalize_dsn(dsn: str) -> tuple[str, str, int, str]:
@@ -14,7 +14,7 @@ def _normalize_dsn(dsn: str) -> tuple[str, str, int, str]:
     Handles mysql+pymysql prefixes and standardizes defaults.
     """
     # Standardize scheme for parsing
-    clean_dsn = dsn.replace("mysql+pymysql", "mysql")
+    clean_dsn = resolve_dsn(dsn).replace("mysql+pymysql", "mysql")
     parsed = urllib.parse.urlparse(clean_dsn)
     
     engine = parsed.scheme
@@ -28,9 +28,6 @@ def _normalize_dsn(dsn: str) -> tuple[str, str, int, str]:
         
     database = parsed.path.lstrip("/")
     
-    if engine == "mongodb" and not database:
-        database = settings.target_mongo_db
-        
     return (engine, host, port, database)
 
 
