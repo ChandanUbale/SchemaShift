@@ -27,8 +27,9 @@ function readSize(): UiSize {
 }
 
 export default function App() {
-  const step = useMigrationStore((s) => s.currentStep);
+  const requestedStep = useMigrationStore((s) => s.currentStep);
   const setStep = useMigrationStore((s) => s.setStep);
+  const step = Math.min(Math.max(requestedStep, 1), STEPS.length);
   const error = useMigrationStore((s) => s.error);
   const sourceName = useMigrationStore((s) => s.sourceName);
   const [theme, setTheme] = useState<'light' | 'dark'>(readTheme);
@@ -49,6 +50,10 @@ export default function App() {
       void document.exitFullscreen();
     }
   }, []);
+
+  useEffect(() => {
+    if (requestedStep !== step) setStep(step);
+  }, [requestedStep, setStep, step]);
 
   const canOpen = (index: number) => index <= step;
 

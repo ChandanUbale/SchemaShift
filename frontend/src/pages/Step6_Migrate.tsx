@@ -191,7 +191,7 @@ export default function Step6Migrate() {
       />
       {failed && progress?.error && <div className="error"><strong>Failure details:</strong> {progress.error}</div>}
       <div className="actions">
-        <button className="btn" onClick={() => store.setStep(5)}>Back</button>
+        <button className="btn" onClick={() => store.setStep(3)}>Back</button>
         <div>
           <Tooltip art="readonly" title="Cleanup target" text="Drops this job’s target tables or collections. Never touches the source.">
             <button className="btn danger migration-action-button" disabled={busy || !store.migrationJobId} onClick={cleanup}>
@@ -204,7 +204,7 @@ export default function Step6Migrate() {
             </button>
           </Tooltip>
           <Tooltip art="validate" title="Continue to validate" text="Compare source expectations to the written target.">
-            <button className="btn primary" disabled={!done} onClick={() => store.setStep(7)}>
+            <button className="btn primary" disabled={!done} onClick={() => store.setStep(5)}>
               Continue to validate →
             </button>
           </Tooltip>

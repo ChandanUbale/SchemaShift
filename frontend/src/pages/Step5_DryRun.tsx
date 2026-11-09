@@ -59,7 +59,7 @@ export default function Step5DryRun() {
       )}
       <DryRunReport dryRun={store.dryRun} />
       <div className="actions">
-        <button className="btn" onClick={() => store.setStep(4)}>Back</button>
+        <button className="btn" onClick={() => store.setStep(2)}>Back</button>
         <div>
           <Tooltip art="dryrun" title="Run dry run" text="Transforms a sample in memory. The target is never contacted.">
             <button className="btn migration-action-button" disabled={busy} onClick={runDry}>
