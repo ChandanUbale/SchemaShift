@@ -202,6 +202,7 @@ export default function SchemaComparison({
   migrationScope: 'all' | 'selected' | null;
 }) {
   const [activeTab, setActiveTab] = useState<'source' | 'destination'>('source');
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle');
   const allEntities = schema?.entities || [];
   const included: Set<string> = migrationScope === 'selected'
     ? new Set(selectedEntities)
@@ -210,6 +211,38 @@ export default function SchemaComparison({
   const source = sourceGraphForScope(relationships, allEntities, sourceType, included);
   const destination = destinationGraph(scopedEntities, sourceType, targetType, source);
   const graph = activeTab === 'source' ? source : destination;
+
+  const copyGraph = async () => {
+    const nodeIds = new Map(graph.nodes.map((node, index) => [String(node.id), `node_${index + 1}`]));
+    const safeLabel = (value: unknown) => String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '#quot;')
+      .replace(/\|/g, '#124;')
+      .replace(/\r?\n/g, '<br/>');
+    const lines = ['flowchart LR'];
+
+    graph.nodes.forEach((node) => {
+      const id = nodeIds.get(String(node.id));
+      if (!id) return;
+      const label = [node.label || node.name || node.id, ...(node.columns || [])].map(safeLabel).join('<br/>');
+      lines.push(`  ${id}["${label}"]`);
+    });
+    graph.edges.forEach((edge) => {
+      const from = nodeIds.get(String(edge.source));
+      const to = nodeIds.get(String(edge.target));
+      if (!from || !to) return;
+      const label = edge.label ? `|${safeLabel(edge.label)}|` : '';
+      lines.push(`  ${from} -->${label} ${to}`);
+    });
+
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      setCopyStatus('copied');
+    } catch {
+      setCopyStatus('error');
+    }
+    window.setTimeout(() => setCopyStatus('idle'), 2500);
+  };
 
   return (
     <section className="card schema-comparison">
@@ -243,6 +276,14 @@ export default function SchemaComparison({
         >
           Destination Schema Graph
         </button>
+      </div>
+      <div className="schema-graph-actions">
+        <button className="btn schema-copy-button" type="button" disabled={!graph.nodes.length} onClick={() => void copyGraph()}>
+          {copyStatus === 'copied' ? 'Graph copied' : 'Copy graph'}
+        </button>
+        <span className={`hint schema-copy-status${copyStatus === 'error' ? ' error-text' : ''}`} aria-live="polite">
+          {copyStatus === 'copied' ? 'Paste the Mermaid graph into a compatible editor.' : copyStatus === 'error' ? 'Clipboard access was blocked by the browser.' : 'Copies the active graph, including its relationships.'}
+        </span>
       </div>
       <div id="schema-graph-panel" role="tabpanel" aria-labelledby={`${activeTab}-schema-tab`}>
         <SchemaGraph nodes={graph.nodes} edges={graph.edges} showColumns={activeTab === 'destination'} />

@@ -581,6 +581,10 @@ button, input, select, textarea {
 .schema-graph-tab { flex: 0 0 auto; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; color: var(--muted); background: transparent; cursor: pointer; font: inherit; }
 .schema-graph-tab.active { color: var(--ink); border-bottom-color: var(--teal); font-weight: 600; }
 .schema-graph-tab:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+.schema-graph-actions { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.schema-copy-button { padding: 8px 12px; }
+.schema-copy-status { margin: 0; font-size: 12px; }
+.schema-copy-status.error-text { color: #b91c1c; }
 .schema-comparison .graph { height: 520px; }
 .schema-projection-note { margin: 10px 0 0; }
 .schema-node { text-align: center; }
