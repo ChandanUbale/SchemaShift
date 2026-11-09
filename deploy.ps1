@@ -35,8 +35,32 @@ if (-not (Test-Path ".env")) {
 Write-Host "[+] Docker connected successfully!" -ForegroundColor Green
 Write-Host "[+] Building and starting containers..." -ForegroundColor Green
 docker compose -f docker-compose.prod.yml up -d --build
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[!] Docker Compose failed to start the production stack. Check port availability and the logs." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
 
-Start-Sleep -Seconds 5
+$healthUrl = "http://localhost:8080/health"
+$healthy = $false
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    try {
+        $health = Invoke-WebRequest -Uri $healthUrl -TimeoutSec 3 -UseBasicParsing
+        if ($health.StatusCode -eq 200) {
+            $healthy = $true
+            break
+        }
+    } catch {
+        # Containers may need a little time to become ready.
+    }
+    Start-Sleep -Seconds 2
+}
+
+if (-not $healthy) {
+    Write-Host "[!] Production containers started, but the app did not become healthy at $healthUrl." -ForegroundColor Red
+    Write-Host "    Recent logs:" -ForegroundColor Yellow
+    docker compose -f docker-compose.prod.yml logs --tail 50
+    exit 1
+}
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Cyan
@@ -45,8 +69,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host "  Frontend / Web UI:  http://localhost:8080"
 Write-Host "  FastAPI Swagger UI: http://localhost:8000/docs"
 Write-Host "  FastAPI Health:     http://localhost:8000/health"
-Write-Host "  MySQL Source:       localhost:3306"
-Write-Host "  MySQL Target:       localhost:3307"
-Write-Host "  MongoDB:            localhost:27017"
+Write-Host "  MySQL:              localhost:3308 (MYSQL_HOST_PORT in .env)"
+Write-Host "  MongoDB:            localhost:27018 (MONGO_HOST_PORT in .env)"
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "View logs anytime with: docker compose -f docker-compose.prod.yml logs -f"

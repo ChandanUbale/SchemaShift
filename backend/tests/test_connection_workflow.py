@@ -167,3 +167,12 @@ def test_compose_dsn_rewrite_uses_one_mysql_service(monkeypatch):
     assert resolve_dsn("mysql+pymysql://root:root@localhost:3307/target_db") == (
         "mysql+pymysql://root:root@mysql:3306/target_db"
     )
+
+
+def test_compose_dsn_rewrite_maps_published_mongo_port_to_container_port(monkeypatch):
+    from app.config import settings
+    from app.services.discovery.dsn import resolve_dsn
+
+    monkeypatch.setattr(settings, "docker_dsn_rewrite", True)
+
+    assert resolve_dsn("mongodb://localhost:27018/source_db") == "mongodb://mongo:27017/source_db"

@@ -41,6 +41,23 @@ Services after a successful start:
 
 No sample databases or records are loaded. If omitted, the target database name defaults to the selected source database. A missing MySQL target database is created during target connection, so the target account needs permission to create databases. MongoDB creates its target database when migration first creates/writes a collection. Use different source and target databases.
 
+### Production Docker and temporary Cloudflare sharing (Windows)
+
+1. Copy `.env.example` to `.env`, then set a strong `SECRET_KEY` and `MYSQL_ROOT_PASSWORD`.
+2. Start Docker Desktop and run [deploy.ps1](deploy.ps1) from the repository root.
+3. Open `http://localhost:8080`. Production database ports default to MySQL `3308` and MongoDB `27018` to avoid colliding with the development stack; change `MYSQL_HOST_PORT` or `MONGO_HOST_PORT` in `.env` if needed.
+4. To create a temporary public URL, run [share.ps1](share.ps1) in another PowerShell window. The generated link is public to anyone who has it; stop it with Ctrl+C.
+
+PowerShell commands:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+.\deploy.ps1
+# In a second PowerShell window, after the production app is healthy:
+.\share.ps1
+```
+
 ```bash
 # Run backend tests inside the container
 docker compose exec backend pytest tests/ -v

@@ -196,7 +196,9 @@ export default function Step1Connect() {
               id="source-dsn"
               type="text"
               disabled={busy}
-              placeholder={store.sourceType === 'mysql' ? 'mysql+pymysql://user:password@host:3306' : 'mongodb://user:password@host:27017'}
+              placeholder={store.sourceType === 'mysql'
+                ? `mysql+pymysql://user:password@host:${import.meta.env.VITE_MYSQL_HOST_PORT || '3306'}`
+                : `mongodb://user:password@host:${import.meta.env.VITE_MONGO_HOST_PORT || '27017'}`}
               value={store.sourceDsn}
               onChange={(e) => updateSourceDsn(e.target.value)}
             />
