@@ -45,7 +45,9 @@ def _pick(
         key = rename.get(field, field)
         if field in unknown_fields:
             out[key] = None if value is None else json.dumps(value, default=str)
-        elif field in json_fields or isinstance(value, (dict, list)):
+        elif field in json_fields:
+            out[key] = None if value is None else json.dumps(value, default=str)
+        elif isinstance(value, (dict, list)):
             out[key] = None if value is None else _sql_value(value)
         else:
             out[key] = value
@@ -101,6 +103,7 @@ def _nodes_at(doc: dict[str, Any], dotted: str) -> list[tuple[dict[str, Any], di
 def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {spec["table"]: [] for spec in flatten}
     row_ids: dict[int, Any] = {}
+    used_row_ids: dict[str, set[Any]] = defaultdict(set)
     for spec in flatten:
         path = spec.get("from_path") or "$"
         fields = spec.get("fields") or []
@@ -115,15 +118,26 @@ def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str
                 rid = _row_id(doc) or uuid.uuid4().hex
                 row[rename.get("id", "id")] = rid
                 row_ids[id(doc)] = rid
+                used_row_ids[table].add(rid)
             out[table].append(row)
             continue
         dotted = path.replace("$.", "").lstrip("$")
         for node, parent in _nodes_at(doc, dotted):
             row = _pick(node, fields, json_fields, rename, include_unknown_fields, exclude_fields)
             if spec.get("emit_id") or not fields or "id" in fields:
-                rid = _row_id(node) or uuid.uuid4().hex
+                candidate = _row_id(node)
+                if spec.get("surrogate_id"):
+                    rid = uuid.uuid4().hex
+                    source_id_column = spec.get("source_id_column")
+                    if source_id_column and candidate is not None:
+                        row[source_id_column] = json.dumps(candidate, default=str)
+                else:
+                    rid = candidate if candidate is not None and candidate not in used_row_ids[table] else uuid.uuid4().hex
+                    while rid in used_row_ids[table]:
+                        rid = uuid.uuid4().hex
                 row[rename.get("id", "id")] = rid
                 row_ids[id(node)] = rid
+                used_row_ids[table].add(rid)
             fk = spec.get("parent_fk")
             if fk and parent is not None:
                 row[fk] = row_ids.get(id(parent)) or _row_id(parent)

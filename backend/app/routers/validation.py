@@ -15,6 +15,8 @@ from app.models.migration import MigrationJob
 from app.models.validation import ValidationReport
 from app.schemas.validation import FinalReport, ValidationRequest, ValidationResult
 from app.services.discovery.connector_factory import ConnectorFactory
+from app.services.migration.plan_builder import build_plan, select_schema_entities
+from app.services.migration.transformer import Transformer
 from app.services.validation import run_count_and_aggregate
 from app.services.validation.checksum_validator import ChecksumValidator
 from app.services.validation.relationship_validator import RelationshipValidator
@@ -32,16 +34,131 @@ def _numeric_fields(source_model: Connection, src_counts: dict, tgt_counts: dict
             continue
         fields = [
             column["name"] for column in entity.get("columns") or []
-            if column.get("name") and str(column.get("data_type") or "").lower() in numeric_types
+            if column.get("name")
+            and (source_model.source_type != "mongodb" or "." not in column["name"])
+            and str(column.get("data_type") or "").lower() in numeric_types
         ]
         if fields:
             result[name] = fields
     return result
 
 
-def _checksum_entity(src_counts: dict, tgt_counts: dict) -> str | None:
-    common = sorted(name for name, count in src_counts.items() if count and tgt_counts.get(name))
-    return common[0] if common else None
+def _validation_mapping(source_model: Connection, entity_names: list[str] | None = None):
+    schema = source_model.schema_json or {}
+    selected_schema = select_schema_entities(schema, entity_names)
+    target_type = "mysql" if source_model.source_type == "mongodb" else "mongodb"
+    plan = build_plan(selected_schema, source_model.source_type, target_type)
+    entities = [entity for entity in selected_schema.get("entities") or [] if entity.get("name")]
+    target_names: dict[str, str] = {}
+    source_primary_keys: dict[str, str] = {}
+    target_primary_keys: dict[str, str] = {}
+    field_mappings: dict[str, dict[str, str]] = {}
+
+    if plan.get("direction") == "document_to_relational":
+        for spec in plan.get("flatten") or []:
+            if (spec.get("from_path") or "$") not in ("$", ""):
+                continue
+            source_name = spec.get("collection") or spec.get("table")
+            if source_name:
+                target_names[source_name] = spec["table"]
+                source_primary_keys[source_name] = "_id"
+                target_primary_keys[source_name] = "id"
+                field_mappings[source_name] = spec.get("rename") or {}
+    elif plan.get("direction") == "relational_to_document":
+        trees = list(plan.get("model_trees") or [])
+        if not trees and plan.get("model_tree"):
+            trees = [plan["model_tree"]]
+        for tree in trees:
+            source_name = tree.get("from_table") or tree.get("collection")
+            if source_name:
+                target_names[source_name] = tree.get("collection") or source_name
+                pk = next((
+                    column.get("name") for entity in entities if entity.get("name") == source_name
+                    for column in entity.get("columns") or [] if column.get("primary_key")
+                ), "id")
+                source_primary_keys[source_name] = pk
+                target_primary_keys[source_name] = pk
+                field_mappings[source_name] = {}
+    else:
+        for entity in entities:
+            name = entity["name"]
+            target_names[name] = name
+            pk = next((column.get("name") for column in entity.get("columns") or [] if column.get("primary_key")), "id")
+            source_primary_keys[name] = pk
+            target_primary_keys[name] = pk
+            field_mappings[name] = {}
+
+    return selected_schema, target_names, source_primary_keys, target_primary_keys, field_mappings, plan
+
+
+def _validate_entity_samples(
+    source,
+    target,
+    entity_names: list[str],
+    target_names: dict[str, str],
+    source_primary_keys: dict[str, str],
+    target_primary_keys: dict[str, str],
+    sample_size: int,
+    plan: dict,
+) -> dict:
+    per_entity = {}
+    total_checked = 0
+    total_matched = 0
+    transformer = Transformer(plan) if plan.get("direction") == "document_to_relational" else None
+    for entity in entity_names:
+        source_pk = source_primary_keys.get(entity, "id")
+        target_pk = target_primary_keys.get(entity, "id")
+        source_rows = source.fetch_sample(entity, sample_size)
+        ids = [row.get(source_pk) for row in source_rows if row.get(source_pk) is not None]
+        if not ids:
+            result = ChecksumValidator.validate(source_rows, [], source_pk_field=source_pk, target_pk_field=target_pk)
+            result["note"] = f"No values for source key {source_pk!r}; sample comparison is inconclusive."
+            result["source_sample_size"] = len(source_rows)
+            result["target_rows_fetched"] = 0
+            per_entity[entity] = result
+            continue
+        fetch_by_ids = getattr(target, "fetch_by_ids", None)
+        if ids and callable(fetch_by_ids):
+            target_rows = fetch_by_ids(target_names.get(entity, entity), target_pk, ids)
+        else:
+            target_rows = []
+        comparison_rows = source_rows
+        comparison_source_pk = source_pk
+        json_fields: set[str] = set()
+        if transformer is not None:
+            transformed = transformer.transform_batch({entity: source_rows}, "document_to_relational")
+            comparison_rows = transformed.get(target_names.get(entity, entity), [])
+            comparison_source_pk = target_pk
+            root_spec = next((
+                spec for spec in plan.get("flatten") or []
+                if spec.get("collection") == entity and (spec.get("from_path") or "$") in ("$", "")
+            ), {})
+            rename = root_spec.get("rename") or {}
+            json_fields.update(rename.get(field, field) for field in root_spec.get("json_fields") or [])
+            known_fields = {rename.get(field, field) for field in root_spec.get("fields") or []}
+            json_fields.update(
+                key for row in comparison_rows for key in row
+                if key not in known_fields and key != target_pk
+            )
+        result = ChecksumValidator.validate(
+            comparison_rows,
+            target_rows,
+            source_pk_field=comparison_source_pk,
+            target_pk_field=target_pk,
+            json_fields=json_fields,
+        )
+        result["source_sample_size"] = len(source_rows)
+        result["target_rows_fetched"] = len(target_rows)
+        per_entity[entity] = result
+        total_checked += int(result["checked"])
+        total_matched += int(result["matched"])
+    return {
+        "checked": total_checked,
+        "matched": total_matched,
+        "summary": f"{total_matched}/{total_checked}" if total_checked else "0/0",
+        "per_entity": per_entity,
+        "note": "For each entity with source keys, compares a source sample with target rows fetched using those same keys.",
+    }
 
 
 def _fk_map(source_model: Connection) -> list[dict[str, str]]:
@@ -121,35 +238,42 @@ def run_validation(job_id: str, payload: ValidationRequest) -> None:
         source.connect()
         target.connect()
 
-        src_counts = source.estimate_counts() or {}
-        tgt_counts = target.estimate_counts() or {}
-        if payload.entity_names is not None:
-            requested = set(payload.entity_names)
-            available = {entity.get("name") for entity in (source_model.schema_json or {}).get("entities", [])}
-            unknown = requested - available
-            if unknown:
-                raise ValueError(f"Unknown source entities: {', '.join(sorted(unknown))}")
-            if not requested:
-                raise ValueError("Select at least one table or collection to validate.")
-            src_counts = {name: count for name, count in src_counts.items() if name in requested}
-            tgt_counts = {name: count for name, count in tgt_counts.items() if name in requested}
+        selected_schema, target_names, source_primary_keys, target_primary_keys, field_mappings, plan = _validation_mapping(
+            source_model, payload.entity_names
+        )
+        source_entities = [entity["name"] for entity in selected_schema.get("entities") or [] if entity.get("name")]
+        source_exact_counts = source.count_entities() or {}
+        target_exact_counts = target.count_entities() or {}
+        src_counts = {name: int(source_exact_counts.get(name, 0) or 0) for name in source_entities}
+        tgt_counts = {
+            name: int(target_exact_counts.get(target_names.get(name, name), 0) or 0)
+            for name in source_entities
+        }
         numeric_fields = _numeric_fields(source_model, src_counts, tgt_counts)
-        counts_aggs = run_count_and_aggregate(source, target, numeric_fields)
+        counts_aggs = run_count_and_aggregate(
+            source,
+            target,
+            numeric_fields,
+            source_counts=src_counts,
+            target_counts=tgt_counts,
+            entity_mapping=target_names,
+            source_primary_keys=source_primary_keys,
+            target_primary_keys=target_primary_keys,
+            field_mappings=field_mappings,
+        )
         update_progress(job_id, 40, JobStatus.RUNNING)
 
         sample_n = payload.sample_size or 100
-        checksum_entity = _checksum_entity(src_counts, tgt_counts)
-        src_rows, tgt_rows = [], []
-        if checksum_entity:
-            try:
-                src_rows = source.fetch_sample(checksum_entity, sample_n)
-            except Exception:
-                src_rows = []
-            try:
-                tgt_rows = target.fetch_sample(checksum_entity, sample_n)
-            except Exception:
-                tgt_rows = []
-        checksum = ChecksumValidator.validate(src_rows, tgt_rows, "id")
+        checksum = _validate_entity_samples(
+            source,
+            target,
+            source_entities,
+            target_names,
+            source_primary_keys,
+            target_primary_keys,
+            sample_n,
+            plan,
+        )
         update_progress(job_id, 70, JobStatus.RUNNING)
 
         fk_map = [fk for fk in _fk_map(source_model) if fk["child_table"] in src_counts and fk["parent_table"] in src_counts]

@@ -365,6 +365,7 @@ def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
                 {"name": "tags", "data_type": "array"},
                 {"name": "settings", "data_type": "object"},
                 {"name": "settings.region", "data_type": "string"},
+                {"name": "categoryId", "data_type": "mixed"},
                 {"name": "items", "data_type": "array"},
                 {"name": "items.code", "data_type": "string"},
                 {"name": "items.adjustments", "data_type": "array"},
@@ -386,16 +387,18 @@ def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
     assert "FOREIGN KEY (`parent_id`) REFERENCES `inventory_rules_items` (`id`)" in plan["generated_ddl"]
     assert "`tags` JSON NULL" in plan["generated_ddl"]
     assert "`settings` JSON NULL" in plan["generated_ddl"]
+    assert "`source_document_id` JSON NULL" in plan["generated_ddl"]
 
     transformed = Transformer(plan).transform_batch({"inventory_rules": [{
         "_id": "root-1",
         "title": "Rule",
         "runtimeFlag": {"enabled": True},
+        "categoryId": "68ad4c589b0afe2827dedc18",
         "tags": ["fast", "safe"],
         "settings": {"region": "EU"},
         "items": [
             {"code": "A", "unseenMetadata": {"source": "late"}, "adjustments": [{"reason": "correction"}]},
-            {"code": "B", "adjustments": []},
+            {"code": "B", "_id": "reused-embedded-id", "adjustments": [{"_id": "reused-adjustment-id", "reason": "second"}]},
         ],
     }]}, "document_to_relational")
 
@@ -406,12 +409,19 @@ def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
     assert json.loads(root["tags"]) == ["fast", "safe"]
     assert json.loads(root["settings"]) == {"region": "EU"}
     assert json.loads(root["runtimeFlag"]) == {"enabled": True}
+    assert json.loads(root["categoryId"]) == "68ad4c589b0afe2827dedc18"
     assert len(item_rows) == 2
+    assert item_rows[0]["id"] != item_rows[1]["id"]
+    assert item_rows[1]["id"] != "reused-embedded-id"
+    assert json.loads(item_rows[1]["source_document_id"]) == "reused-embedded-id"
     assert all(row["parent_id"] == "root-1" for row in item_rows)
     assert json.loads(item_rows[0]["unseenMetadata"]) == {"source": "late"}
-    assert len(adjustment_rows) == 1
+    assert len(adjustment_rows) == 2
     assert adjustment_rows[0]["parent_id"] == item_rows[0]["id"]
     assert adjustment_rows[0]["reason"] == "correction"
+    assert adjustment_rows[1]["parent_id"] == item_rows[1]["id"]
+    assert adjustment_rows[0]["id"] != adjustment_rows[1]["id"]
+    assert json.loads(adjustment_rows[1]["source_document_id"]) == "reused-adjustment-id"
 
 
 def test_plan_builder_mysql_to_mongo_copies_non_shop_tables():

@@ -78,7 +78,7 @@ class ReportGenerator:
     <tr><th>Batches failed</th><td>{batches_failed}</td></tr>
     <tr><th>Duration (seconds)</th><td>{duration}</td></tr>
   </table>
-  <h2>2. Validation</h2>
+  <h2>2. Validation after migration</h2>
   <table>
     <tr><th>Records matched</th><td>{count_pct}%</td></tr>
     <tr><th>Aggregate matched</th><td>{agg_text}</td></tr>

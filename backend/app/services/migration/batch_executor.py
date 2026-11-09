@@ -27,6 +27,13 @@ def _ensure_job(job_id: str) -> None:
         }
 
 
+def _entity_counts(connector) -> dict[str, int]:
+    count_method = getattr(connector, "count_entities", None)
+    if callable(count_method):
+        return count_method() or {}
+    return connector.estimate_counts() or {}
+
+
 def _embed_tables(node: dict[str, Any]) -> list[str]:
     names = []
     for child in node.get("embed") or []:
@@ -164,7 +171,7 @@ class BatchExecutor:
             if not tree:
                 raise ValueError("relational_to_document requires a model tree.")
             trees = [tree]
-        counts = source_connector.estimate_counts() or {}
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0
@@ -220,7 +227,7 @@ class BatchExecutor:
         if not flatten:
             raise ValueError("document_to_relational requires plan['flatten']")
         groups = _flatten_groups(flatten)
-        counts = source_connector.estimate_counts() or {}
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0
@@ -271,8 +278,8 @@ class BatchExecutor:
     ) -> dict[str, Any]:
         entities = list(plan.get("entities") or [])
         if not entities:
-            entities = list((source_connector.estimate_counts() or {}).keys())
-        counts = source_connector.estimate_counts() or {}
+            entities = list(_entity_counts(source_connector).keys())
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0

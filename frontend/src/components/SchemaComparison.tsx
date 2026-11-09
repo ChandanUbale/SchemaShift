@@ -111,7 +111,9 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
           : new Set(arrayPaths.filter((arrayPath) => arrayPath.startsWith(`${path}.`))
             .map((arrayPath) => arrayPath.slice(path.length + 1)).filter((remainder) => !remainder.includes('.')));
         const reserved = new Set(['id']);
-        const columns = ['id · VARCHAR(64) PRIMARY KEY'];
+        const columns = [path === '$'
+          ? 'id · VARCHAR(64) PRIMARY KEY (Mongo _id)'
+          : 'id · VARCHAR(64) PRIMARY KEY (generated surrogate)'];
         let parentColumn = '';
         if (path !== '$') {
           parentColumn = 'parent_id';
@@ -133,6 +135,13 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
           while (reserved.has(sqlName)) sqlName = `${base.slice(0, 62)}_${suffix++}`;
           reserved.add(sqlName);
           columns.push(`${sqlName} · ${type}`);
+        }
+        if (path !== '$') {
+          let sourceIdColumn = 'source_document_id';
+          let sourceIdSuffix = 2;
+          while (reserved.has(sourceIdColumn)) sourceIdColumn = `source_document_id_${sourceIdSuffix++}`;
+          reserved.add(sourceIdColumn);
+          columns.push(`${sourceIdColumn} · JSON (original embedded key)`);
         }
         nodes.push({
           id: tableName,

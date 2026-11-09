@@ -172,7 +172,24 @@ class MongoDBConnector(BaseConnector):
         cursor = self._col(entity_name).find().skip(max(offset, 0)).limit(limit)
         return [_jsonable(d) for d in cursor]
 
+    def fetch_by_ids(self, entity_name: str, field_name: str, values: list[Any]) -> list[dict[str, Any]]:
+        if not values:
+            return []
+        query_values = values
+        if field_name == "_id":
+            query_values = [
+                ObjectId(value) if isinstance(value, str) and ObjectId.is_valid(value) else value
+                for value in values
+            ]
+        return [_jsonable(doc) for doc in self._col(entity_name).find({field_name: {"$in": query_values}})]
+
     def estimate_counts(self) -> dict[str, int]:
         if self._db is None:
             raise RuntimeError("MongoDBConnector is not connected")
         return {col: self._db[col].estimated_document_count() for col in self.list_entities()}
+
+    def count_entities(self) -> dict[str, int]:
+        """Return exact collection counts for migration and validation accounting."""
+        if self._db is None:
+            raise RuntimeError("MongoDBConnector is not connected")
+        return {col: self._db[col].count_documents({}) for col in self.list_entities()}

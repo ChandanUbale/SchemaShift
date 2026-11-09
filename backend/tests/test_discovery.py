@@ -118,6 +118,62 @@ def test_mysql_relationship_graph_qualifies_external_database_foreign_key():
     assert graph["nodes"][1]["external"] is True
 
 
+def test_mysql_exact_counts_query_each_table(monkeypatch):
+    from app.services.discovery.mysql_connector import MySQLConnector
+
+    class Cursor:
+        def __init__(self):
+            self.count = None
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, *_args):
+            self.statements.append(query)
+            self.count = {"orders": 1234, "order_items": 5678}[query.split("`")[1]]
+
+        def fetchone(self):
+            return {"row_count": self.count}
+
+    cursor = Cursor()
+    connector = MySQLConnector("mysql+pymysql://root:root@localhost/demo")
+    connector._conn = type("Connection", (), {"cursor": lambda _self: cursor})()
+    monkeypatch.setattr(connector, "list_entities", lambda: ["orders", "order_items"])
+
+    assert connector.count_entities() == {"orders": 1234, "order_items": 5678}
+    assert len(cursor.statements) == 2
+    assert all("COUNT(*)" in query for query in cursor.statements)
+
+
+def test_mongodb_exact_counts_use_count_documents():
+    from app.services.discovery.mongodb_connector import MongoDBConnector
+
+    class Collection:
+        def __init__(self, count):
+            self.count = count
+
+        def count_documents(self, query):
+            assert query == {}
+            return self.count
+
+    class Database:
+        def __init__(self):
+            self.collections = {"orders": Collection(12), "customers": Collection(4)}
+
+        def __getitem__(self, name):
+            return self.collections[name]
+
+    connector = MongoDBConnector("mongodb://localhost/test", db_name="test")
+    connector._db = Database()
+    connector.list_entities = lambda: ["orders", "customers"]
+
+    assert connector.count_entities() == {"orders": 12, "customers": 4}
+
+
 def test_mysql_connector_list_entities():
     pytest.skip("integration test — needs MySQL")
 

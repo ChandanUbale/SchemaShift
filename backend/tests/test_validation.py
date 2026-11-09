@@ -60,6 +60,20 @@ def test_checksum_validator_identical_rows():
     assert roundtrip["matched"] == 0
 
 
+def test_checksum_validator_normalizes_sql_numeric_and_boolean_values():
+    source = [{"id": "doc-1", "enabled": True, "amount": 2}]
+    target = [{"id": "doc-1", "enabled": 1, "amount": 2.0}]
+    result = ChecksumValidator.validate(source, target)
+    assert result["summary"] == "1/1"
+
+
+def test_checksum_validator_parses_known_json_fields_before_hashing():
+    source = [{"id": "doc-1", "payload": '{"z": 1, "a": 2}'}]
+    target = [{"id": "doc-1", "payload": '{"a": 2, "z": 1}'}]
+    result = ChecksumValidator.validate(source, target, json_fields={"payload"})
+    assert result["summary"] == "1/1"
+
+
 def test_checksum_validator_mismatched_rows():
     src = [{"id": 1, "name": "Alice", "email": "a@x.com"}]
     tgt = [{"id": 1, "name": "Alicia", "email": "a@x.com"}]
@@ -70,12 +84,134 @@ def test_checksum_validator_mismatched_rows():
     assert result["mismatched_pks"] == [1]
 
 
+def test_checksum_validator_matches_different_source_and_target_id_fields():
+    source = [{"_id": "doc-1", "name": "Rates", "categoryId": "abc"}]
+    target = [{"id": "doc-1", "name": "Rates", "categoryId": "abc"}]
+    result = ChecksumValidator.validate(
+        source,
+        target,
+        source_pk_field="_id",
+        target_pk_field="id",
+    )
+    assert result["summary"] == "1/1"
+    assert result["mismatched_pks"] == []
+
+
+def test_checksum_validator_counts_source_keys_missing_from_target():
+    result = ChecksumValidator.validate(
+        [{"_id": "doc-1", "name": "A"}, {"_id": "doc-2", "name": "B"}],
+        [{"id": "doc-1", "name": "A"}],
+        source_pk_field="_id",
+        target_pk_field="id",
+    )
+    assert result["checked"] == 2
+    assert result["matched"] == 1
+    assert result["summary"] == "1/2"
+    assert result["missing_in_target"] == 1
+    assert result["mismatched_pks"] == ["doc-2"]
+
+
 class _RelConn:
     def __init__(self, tables):
         self.tables = tables
 
     def fetch_sample(self, name, n):
         return list(self.tables.get(name, []))[:n]
+
+    def fetch_batch(self, name, offset, limit):
+        return list(self.tables.get(name, []))[offset:offset + limit]
+
+    def fetch_by_ids(self, name, field, values):
+        wanted = set(values)
+        return [row for row in self.tables.get(name, []) if row.get(field) in wanted]
+
+
+def test_aggregate_validator_compares_target_rows_by_source_ids():
+    from app.services.validation.aggregate_validator import AggregateValidator
+
+    source = _RelConn({"orders": [{"id": 1, "amount": 10}, {"id": 2, "amount": 20}]})
+    target = _RelConn({"orders_docs": [{"id": 2, "amount": 20}, {"id": 1, "amount": 10}, {"id": 3, "amount": 999}]})
+    result = AggregateValidator.validate(
+        source,
+        target,
+        {"orders": ["amount"]},
+        entity_mapping={"orders": "orders_docs"},
+        source_primary_keys={"orders": "id"},
+        target_primary_keys={"orders": "id"},
+    )
+    assert result["match"] is True
+    assert result["details"]["orders"]["amount"]["source_sum"] == 30
+    assert result["details"]["orders"]["amount"]["target_sum"] == 30
+    assert result["details"]["orders"]["_sample"]["target_rows_with_matching_ids"] == 2
+
+
+def test_validation_mapping_aligns_mongo_collections_to_root_mysql_tables():
+    from app.models.connection import Connection
+    from app.routers.validation import _validation_mapping
+
+    source = Connection(source_type="mongodb")
+    source.schema_json = {
+        "source_type": "mongodb",
+        "entities": [{
+            "name": "mapping_categories",
+            "columns": [
+                {"name": "_id", "data_type": "objectid"},
+                {"name": "name", "data_type": "string"},
+                {"name": "sources", "data_type": "array"},
+                {"name": "sources.system", "data_type": "string"},
+            ],
+            "nesting": [{"path": "sources", "type": "array"}],
+        }],
+    }
+    selected, target_names, source_keys, target_keys, field_mappings, plan = _validation_mapping(source)
+
+    assert [entity["name"] for entity in selected["entities"]] == ["mapping_categories"]
+    assert target_names == {"mapping_categories": "mapping_categories"}
+    assert source_keys == {"mapping_categories": "_id"}
+    assert target_keys == {"mapping_categories": "id"}
+    assert field_mappings == {"mapping_categories": {}}
+    assert plan["direction"] == "document_to_relational"
+
+
+def test_checksum_validation_uses_transformed_root_projection_for_mongo():
+    from app.routers.validation import _validate_entity_samples
+    from app.services.migration.plan_builder import build_plan
+
+    schema = {
+        "source_type": "mongodb",
+        "entities": [{
+            "name": "widgets",
+            "columns": [
+                {"name": "_id", "data_type": "objectid"},
+                {"name": "name", "data_type": "string"},
+                {"name": "enabled", "data_type": "boolean"},
+                {"name": "meta", "data_type": "object"},
+                {"name": "items", "data_type": "array"},
+                {"name": "items.value", "data_type": "string"},
+            ],
+            "nesting": [{"path": "items", "type": "array"}],
+        }],
+    }
+    plan = build_plan(schema, "mongodb", "mysql")
+
+    class _MongoSamples:
+        def fetch_sample(self, _name, _size):
+            return [{"_id": "doc-1", "name": "Widget", "enabled": True, "meta": {"z": 1, "a": 2}, "items": [{"value": "part"}]}]
+
+    target = _RelConn({"widgets": [{"id": "doc-1", "name": "Widget", "enabled": 1, "meta": '{"a": 2, "z": 1}'}]})
+    result = _validate_entity_samples(
+        _MongoSamples(),
+        target,
+        ["widgets"],
+        {"widgets": "widgets"},
+        {"widgets": "_id"},
+        {"widgets": "id"},
+        10,
+        plan,
+    )
+
+    assert result["summary"] == "1/1"
+    assert result["per_entity"]["widgets"]["missing_in_target"] == 0
 
 
 def test_relationship_validator_mysql_orphans_fail():

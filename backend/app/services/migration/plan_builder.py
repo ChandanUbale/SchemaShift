@@ -299,6 +299,17 @@ def _generic_mongo_table(
                 sql_type = _mongo_sql_type(data_type)
             definitions.append(f"`{target_name}` {sql_type} NULL")
 
+        source_id_column = None
+        if parent_path is not None:
+            source_id_column = "source_document_id"
+            base_source_id_column = source_id_column
+            suffix = 2
+            while source_id_column in reserved:
+                source_id_column = f"{base_source_id_column}_{suffix}"
+                suffix += 1
+            reserved.add(source_id_column)
+            definitions.append(f"`{source_id_column}` JSON NULL")
+
         spec: dict[str, Any] = {
             "table": table,
             "from_path": path,
@@ -309,10 +320,12 @@ def _generic_mongo_table(
             "emit_id": True,
             "include_unknown_fields": True,
             "exclude_fields": sorted(child_array_names),
+            "surrogate_id": parent_path is not None,
         }
         if parent_fk and parent_path is not None:
             spec["parent_fk"] = parent_fk
             spec["parent_path"] = parent_path
+            spec["source_id_column"] = source_id_column
             parent_table = table_by_path.get(parent_path, root_table)
             definitions.append(
                 f"FOREIGN KEY (`{parent_fk}`) REFERENCES `{parent_table}` (`id`)"
