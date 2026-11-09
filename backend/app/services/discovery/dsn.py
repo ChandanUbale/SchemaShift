@@ -17,12 +17,10 @@ def resolve_dsn(dsn: str) -> str:
 
     port = parsed.port
     scheme = (parsed.scheme or "").lower()
-    if port == 3307:
-        new_host, new_port = "mysql-target", 3306
-    elif port == 27017 or scheme.startswith("mongodb"):
-        new_host, new_port = "mongo", port or 27017
+    if scheme.startswith("mongodb") or port in (27017, 27018):
+        new_host, new_port = "mongo", 27017
     else:
-        new_host, new_port = "mysql-source", port or 3306
+        new_host, new_port = "mysql", 3306
 
     userinfo = ""
     if parsed.username:

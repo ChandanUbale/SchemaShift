@@ -22,6 +22,8 @@ class AggregateValidator:
         for row in rows:
             val = _get_val(row, parts)
             try:
+                if hasattr(val, "to_decimal"):
+                    val = val.to_decimal()
                 total += float(val) if val is not None else 0.0
             except (ValueError, TypeError):
                 pass
@@ -33,28 +35,43 @@ class AggregateValidator:
         target_connector,
         numeric_fields: dict[str, list[str]],   # {table: [col1, col2]}
         tolerance: float = 0.001,
+        entity_mapping: dict[str, str] | None = None,
+        source_primary_keys: dict[str, str] | None = None,
+        target_primary_keys: dict[str, str] | None = None,
+        field_mappings: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """
         Compare SUM of selected numeric columns between source and target via sampling.
         """
         all_match = True
         details = {}
+        entity_mapping = entity_mapping or {}
+        source_primary_keys = source_primary_keys or {}
+        target_primary_keys = target_primary_keys or {}
+        field_mappings = field_mappings or {}
 
         for entity, fields in numeric_fields.items():
-            # Use fetch_sample for a universal approach (10,000 rows should be enough for MVP)
-            src_rows = source_connector.fetch_sample(entity, 10000)
-            
-            # For MongoDB targets, the entity might not exist at the root, 
-            # but we attempt to fetch it or rely on Lavanya passing the correct mapping.
+            target_entity = entity_mapping.get(entity, entity)
+            src_pk = source_primary_keys.get(entity, "id")
+            tgt_pk = target_primary_keys.get(entity, src_pk)
+            fetch_source_batch = getattr(source_connector, "fetch_batch", None)
+            src_rows = (fetch_source_batch(entity, 0, 10000) if callable(fetch_source_batch)
+                        else source_connector.fetch_sample(entity, 10000))
+            ids = [row.get(src_pk) for row in src_rows if row.get(src_pk) is not None]
+            fetch_target_by_ids = getattr(target_connector, "fetch_by_ids", None)
             try:
-                tgt_rows = target_connector.fetch_sample(entity, 10000)
+                if ids and callable(fetch_target_by_ids):
+                    tgt_rows = fetch_target_by_ids(target_entity, tgt_pk, ids)
+                else:
+                    tgt_rows = target_connector.fetch_sample(target_entity, 10000)
             except Exception:
                 tgt_rows = []
 
             entity_details = {}
             for field in fields:
                 src_sum = AggregateValidator._extract_sum(src_rows, field)
-                tgt_sum = AggregateValidator._extract_sum(tgt_rows, field)
+                target_field = field_mappings.get(entity, {}).get(field, field)
+                tgt_sum = AggregateValidator._extract_sum(tgt_rows, target_field)
                 
                 # Check match using tolerance
                 diff = abs(src_sum - tgt_sum)
@@ -69,6 +86,12 @@ class AggregateValidator:
                     "target_sum": round(tgt_sum, 4),
                     "match": match
                 }
+            entity_details["_sample"] = {
+                "source_rows": len(src_rows),
+                "target_rows_with_matching_ids": len(tgt_rows),
+                "source_primary_key": src_pk,
+                "target_entity": target_entity,
+            }
             details[entity] = entity_details
 
         return {

@@ -8,11 +8,12 @@ class ValidationRequest(BaseModel):
     source_connection_id: int
     target_connection_id: int
     sample_size: int = 100
+    entity_names: list[str] | None = None
 
 
 class ValidationResult(BaseModel):
     """
-    Post-migration validation — kept separate from profiling risk score.
+    Post-migration validation results.
     """
     count_match_pct: float          # e.g. 99.8
     aggregate_match: bool           # SUM / AVG match on selected numeric fields
@@ -23,9 +24,6 @@ class ValidationResult(BaseModel):
 
 class FinalReport(BaseModel):
     """Combines all three stages for the final report page."""
-    # 1 — data quality before migration
-    risk_label: str                 # low | medium | high
-    risk_score: float
 
     # 2 — migration execution stats
     records_migrated: int

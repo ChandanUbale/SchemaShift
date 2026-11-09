@@ -22,4 +22,4 @@ class Connection(Base):
     schema_json = Column(JSON, nullable=True)           # Added for discovery schema
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # TODO: add relationship to ProfilingJob, MigrationJob once those models exist
+    # Migration job associations are stored by job ID.

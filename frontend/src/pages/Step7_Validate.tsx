@@ -49,6 +49,7 @@ export default function Step7Validate() {
         migration_job_id: store.migrationJobId,
         source_connection_id: store.sourceConnectionId,
         target_connection_id: store.targetConnectionId,
+        entity_names: store.selectedEntities.length ? store.selectedEntities : undefined,
       });
       const { report, validation } = await waitForReport(store.migrationJobId);
       store.setValidation(started.job_id, validation, report);
@@ -64,7 +65,7 @@ export default function Step7Validate() {
       <p className="kicker">Validation complete · report ready</p>
       <div className="page-head">
         <h2>{ready ? 'Migration completed with proof' : 'Validate the target against the source'}</h2>
-        <div className="step-count">STEP 7 / 7</div>
+        <div className="step-count">STEP 5 / 5</div>
       </div>
       {ready && (
         <div className="banner ok">
@@ -83,24 +84,23 @@ export default function Step7Validate() {
         <FinalReport
           report={store.finalReport}
           validation={store.validation}
-          profiling={store.profiling}
           migration={store.migrationProgress}
         />
       )}
       <div className="actions">
-        <button type="button" className="btn" onClick={() => htmlReport ? setHtmlReport(null) : store.setStep(6)}>
+        <button type="button" className="btn" onClick={() => htmlReport ? setHtmlReport(null) : store.setStep(4)}>
           {htmlReport ? '← Back to validation' : 'Back'}
         </button>
         {!htmlReport && (
           <div>
             {ready && (
               <>
-                <button type="button" className="btn" style={{ marginRight: 8 }} onClick={() => downloadJson('schemashift-report.json', store.finalReport)}>
+                <button type="button" className="btn migration-action-button" onClick={() => downloadJson('schemashift-report.json', store.finalReport)}>
                   Download JSON
                 </button>
                 {store.migrationJobId && (
                   <Tooltip art="validate" title="Full report" text="Opens the HTML proof inside this page. Use Back to validation to return.">
-                    <button type="button" className="btn" style={{ marginRight: 8 }} disabled={busy} onClick={() => void openFullReport()}>
+                    <button type="button" className="btn migration-action-button" disabled={busy} onClick={() => void openFullReport()}>
                       View full report
                     </button>
                   </Tooltip>

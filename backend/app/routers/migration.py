@@ -3,12 +3,13 @@ routers/migration.py — Dry run, execute, progress SSE, approval, and cleanup.
 
 Hard write boundary:
   - dry_run   → ZERO target writes
-  - execute   → writes ONLY after user approval + plan_id
+    - execute   → writes ONLY after user approval + successful dry-run
   - cleanup   → drops this job's target tables/collections
 """
 
 from datetime import datetime
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -19,7 +20,6 @@ from app.database import get_db, SessionLocal
 from app.jobs import JobStatus, _progress_cache, create_job, get_job_status, status_text, update_progress
 from app.models.connection import Connection
 from app.models.migration import MigrationJob
-from app.models.profiling import ProfilingJob
 from app.schemas.migration import (
     CleanupRequest,
     DryRunRequest,
@@ -33,24 +33,25 @@ from app.services.migration.cleanup import (
     cleanup_entry,
     entities_from_audit,
     require_cleanup_allowed,
-    seed_writer_for_cleanup,
+    restore_writer_entities_from_audit,
 )
 from app.services.migration.dry_runner import DryRunner
 from app.services.migration.execute_gate import (
-    require_high_risk_confirm,
+    apply_target_collection,
     require_plan_id,
     require_successful_dry_run,
 )
-from app.services.migration.plan_builder import build_plan, collections_to_read, schema_from_connector
+from app.services.migration.plan_builder import (
+    build_plan,
+    collections_to_read,
+    schema_from_connector,
+    select_schema_entities,
+)
 from app.services.migration.safety import assert_distinct_targets
 from app.services.migration.transformer import Transformer
 from app.services.migration.writer_factory import WriterFactory
 
 router = APIRouter()
-
-_SHOP_RELATIONAL = ("customers", "orders", "order_items")
-_SHOP_DOCUMENT = ("customers",)
-
 
 def _open_connector(conn_model: Connection):
     if conn_model.source_type == "mysql":
@@ -65,7 +66,9 @@ def _open_connector(conn_model: Connection):
 def _open_writer(target_type: str, dsn: str):
     if target_type == "mongodb":
         parsed = urlparse(dsn)
-        db_name = parsed.path.lstrip("/").split("?")[0] or settings.target_mongo_db
+        db_name = parsed.path.lstrip("/").split("?")[0]
+        if not db_name:
+            raise ValueError("MongoDB target connection string must include a database name.")
         return WriterFactory.get_writer("mongodb", dsn, db_name=db_name)
     return WriterFactory.get_writer("mysql", dsn)
 
@@ -93,9 +96,7 @@ def _entity_names(conn_model: Connection, plan: dict) -> list[str]:
     names = [entity["name"] for entity in schema.get("entities") or [] if entity.get("name")]
     if names:
         return names
-    if plan.get("direction") == "document_to_relational":
-        return list(_SHOP_DOCUMENT)
-    return list(_SHOP_RELATIONAL)
+    raise ValueError("No source entities are available in the discovered schema.")
 
 
 def _store_issues(job_id: str, issues: list[dict], sample_size: int) -> None:
@@ -118,17 +119,7 @@ def _latest_dry_run(db: Session, plan_id: str) -> MigrationJob | None:
     )
 
 
-def _latest_risk_label(db: Session, connection_id: int) -> str | None:
-    row = (
-        db.query(ProfilingJob)
-        .filter(ProfilingJob.connection_id == connection_id)
-        .order_by(ProfilingJob.id.desc())
-        .first()
-    )
-    return row.risk_label if row else None
-
-
-def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
+def run_dry_run(job_id: str, source_connection_id: int, plan_id: str, entity_names: list[str] | None = None) -> None:
     """Background: sample source only, transform in memory, persist issues. No writers."""
     db = SessionLocal()
     try:
@@ -141,9 +132,10 @@ def run_dry_run(job_id: str, source_connection_id: int, plan_id: str) -> None:
         connector.connect()
         try:
             schema = _ensure_schema(conn_model, connector, db)
+            schema = select_schema_entities(schema, entity_names)
             target_type = "mysql" if conn_model.source_type == "mongodb" else "mongodb"
             plan = build_plan(schema, conn_model.source_type, target_type, plan_id)
-            sample_n = settings.profile_sample_size
+            sample_n = settings.dry_run_sample_size
             tables: dict[str, list] = {}
             for name in _entity_names(conn_model, plan):
                 try:
@@ -215,7 +207,7 @@ def run_migration_job(
             job_row.batches_done = max((result.get("batches_total") or 0) - failed, 0)
             job_row.progress_pct = 100
             job_row.status = JobStatus.FAILED.value if failed else JobStatus.DONE.value
-            job_row.error = f"{failed} batch(es) failed" if failed else None
+            job_row.error = ((get_job_status(job_id) or {}).get("error") or f"{failed} batch(es) failed") if failed else None
             job_row.completed_at = datetime.utcnow()
             db.commit()
     except Exception as exc:
@@ -239,26 +231,33 @@ def run_migration_job(
 def start_dry_run(payload: DryRunRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
     Sample the source, run the transformer, collect issues — NO target writes.
-    Returns a job_id; client polls /migration/{job_id}/status then /dry-run.
+    Creates a migration plan from the discovered schema and returns its plan_id with the job_id.
     """
     conn_model = db.query(Connection).filter(Connection.id == payload.source_connection_id).first()
     if not conn_model:
         raise HTTPException(status_code=404, detail="Connection not found")
 
+    plan_id = str(uuid4())
     job_id = create_job(db, "dry_run", connection_id=payload.source_connection_id)
     db.add(MigrationJob(
         job_id=job_id,
         source_connection_id=payload.source_connection_id,
         target_connection_id=payload.source_connection_id,
-        plan_id=payload.plan_id,
+        plan_id=plan_id,
         is_dry_run=True,
         status=JobStatus.PENDING.value,
         audit_log=[],
     ))
     db.commit()
     _store_issues(job_id, [], 0)
-    background_tasks.add_task(run_dry_run, job_id, payload.source_connection_id, payload.plan_id)
-    return DryRunResult(job_id=job_id, issues=[], total_issues=0, sample_size=0)
+    background_tasks.add_task(
+        run_dry_run,
+        job_id,
+        payload.source_connection_id,
+        plan_id,
+        payload.entity_names,
+    )
+    return DryRunResult(job_id=job_id, plan_id=plan_id, issues=[], total_issues=0, sample_size=0)
 
 
 @router.get("/{job_id}/dry-run", response_model=DryRunResult)
@@ -276,6 +275,7 @@ def get_dry_run_result(job_id: str, db: Session = Depends(get_db)):
     sample_size = int((cache or {}).get("sample_size") or 0)
     return DryRunResult(
         job_id=job_id,
+        plan_id=job_row.plan_id if job_row else None,
         issues=issues,
         total_issues=len(issues),
         sample_size=sample_size,
@@ -301,6 +301,12 @@ def execute_migration(
     target = db.query(Connection).filter(Connection.id == payload.target_connection_id).first()
     if not source or not target:
         raise HTTPException(status_code=404, detail="Connection not found")
+    expected_target_type = "mysql" if source.source_type == "mongodb" else "mongodb"
+    if target.source_type != expected_target_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target engine is fixed to {expected_target_type} for a {source.source_type} source.",
+        )
 
     try:
         require_successful_dry_run(_latest_dry_run(db, payload.plan_id))
@@ -308,14 +314,6 @@ def execute_migration(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     assert_distinct_targets(source.dsn, target.dsn, payload.in_place_optimisation)
-
-    try:
-        require_high_risk_confirm(
-            _latest_risk_label(db, payload.source_connection_id),
-            payload.confirm_high_risk,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     schema = source.schema_json or {}
     if not schema.get("entities"):
@@ -325,10 +323,16 @@ def execute_migration(
             schema = _ensure_schema(source, probe, db)
         finally:
             probe.disconnect()
-    target_type = (payload.override_recommendation or target.source_type or "").lower()
-    if target_type not in ("mysql", "mongodb"):
-        target_type = (target.source_type or "mongodb").lower()
-    plan = build_plan(schema, source.source_type, target_type, payload.plan_id)
+    target_type = expected_target_type
+    try:
+        schema = select_schema_entities(schema, payload.entity_names)
+        plan = build_plan(schema, source.source_type, target_type, payload.plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        plan = apply_target_collection(plan, payload.target_collection_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     job_id = create_job(db, "migration", connection_id=payload.source_connection_id)
     db.add(MigrationJob(
@@ -410,7 +414,7 @@ def cleanup_target(payload: CleanupRequest, db: Session = Depends(get_db)):
 
     writer = _open_writer(target.source_type, target.dsn)
     entities = entities_from_audit(job.audit_log, target.source_type)
-    seed_writer_for_cleanup(writer, entities)
+    restore_writer_entities_from_audit(writer, entities)
     writer.cleanup(payload.job_id)
 
     log = list(job.audit_log or [])

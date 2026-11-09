@@ -3,7 +3,7 @@ services/discovery/mysql_connector.py — MySQL source connector.
 
 Driver: pymysql (MIT license)
 Reads INFORMATION_SCHEMA for schema discovery.
-Uses LIMIT for sampling (configurable via PROFILE_SAMPLE_SIZE).
+Uses LIMIT for bounded dry-run sampling.
 """
 
 from typing import Any
@@ -108,7 +108,7 @@ class MySQLConnector(BaseConnector):
 
             # Foreign Keys
             cursor.execute("""
-                SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+                SELECT COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_NAME = %s
@@ -117,6 +117,7 @@ class MySQLConnector(BaseConnector):
             for row in cursor.fetchall():
                 schema["foreign_keys"].append({
                     "column": row["COLUMN_NAME"],
+                    "ref_database": row["REFERENCED_TABLE_SCHEMA"],
                     "ref_table": row["REFERENCED_TABLE_NAME"],
                     "ref_column": row["REFERENCED_COLUMN_NAME"]
                 })
@@ -183,3 +184,35 @@ class MySQLConnector(BaseConnector):
                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
             """)
             return {row["TABLE_NAME"]: (row["TABLE_ROWS"] or 0) for row in cursor.fetchall()}
+
+    def count_entities(self) -> dict[str, int]:
+        """Return exact row counts instead of InnoDB's approximate TABLE_ROWS."""
+        if not self._conn:
+            raise RuntimeError("Not connected")
+        counts = {}
+        with self._conn.cursor() as cursor:
+            for entity_name in self.list_entities():
+                identifier = entity_name.replace("`", "``")
+                cursor.execute(f"SELECT COUNT(*) AS row_count FROM `{identifier}`")
+                counts[entity_name] = int(cursor.fetchone()["row_count"])
+        return counts
+
+    def fetch_by_ids(self, entity_name: str, field_name: str, values: list[Any]) -> list[dict[str, Any]]:
+        if not self._conn:
+            raise RuntimeError("Not connected")
+        if not values:
+            return []
+        if entity_name not in self.list_entities():
+            raise ValueError(f"Unknown table: {entity_name}")
+        valid_columns = {column["name"] for column in self.describe_entity(entity_name).get("columns", [])}
+        if field_name not in valid_columns:
+            raise ValueError(f"Unknown column {field_name!r} in table {entity_name!r}")
+        table_ident = entity_name.replace("`", "``")
+        column_ident = field_name.replace("`", "``")
+        placeholders = ", ".join(["%s"] * len(values))
+        with self._conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT * FROM `{table_ident}` WHERE `{column_ident}` IN ({placeholders})",
+                tuple(values),
+            )
+            return cursor.fetchall()

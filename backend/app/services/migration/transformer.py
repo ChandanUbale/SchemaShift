@@ -3,39 +3,9 @@ Bidirectional relational ↔ document transformer (in memory, no DB I/O).
 """
 
 import json
+import uuid
 from collections import defaultdict
 from typing import Any
-
-_SHOP_TREE = {
-    "from_table": "customers",
-    "collection": "customers",
-    "fields": ["id", "name", "email", "created_at"],
-    "embed": [
-        {
-            "from_table": "orders",
-            "as": "orders",
-            "join": {"parent": "id", "child": "customer_id"},
-            "fields": ["id", "order_date", "total", "status"],
-            "embed": [
-                {
-                    "from_table": "order_items",
-                    "as": "items",
-                    "join": {"parent": "id", "child": "order_id"},
-                    "fields": ["product_id", "product_name", "quantity", "price"],
-                }
-            ],
-        }
-    ],
-}
-
-_SHOP_FLATTEN = [
-    {"table": "customers", "from_path": "$", "fields": ["id", "name", "email", "created_at"]},
-    {"table": "orders", "from_path": "$.orders", "parent_fk": "customer_id",
-     "fields": ["id", "order_date", "total", "status"]},
-    {"table": "order_items", "from_path": "$.orders.items", "parent_fk": "order_id",
-     "fields": ["product_id", "product_name", "quantity", "price"]},
-]
-
 
 def _sql_value(value: Any) -> Any:
     if isinstance(value, (dict, list)):
@@ -48,9 +18,13 @@ def _pick(
     fields: list[str],
     json_fields: list[str] | None = None,
     rename: dict[str, str] | None = None,
+    include_unknown_fields: bool = False,
+    exclude_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     json_fields = set(json_fields or [])
     rename = rename or {}
+    excluded = set(exclude_fields or [])
+    known_fields = set(fields)
     if not fields:
         items = [(key, value) for key, value in row.items() if key != "_id"]
     else:
@@ -59,10 +33,21 @@ def _pick(
             if field == "id" and field not in row:
                 continue
             items.append((field, row.get(field)))
+    unknown_fields = set()
+    if include_unknown_fields:
+        for key, value in row.items():
+            if key in known_fields or key in excluded or key in {"_id", "id"}:
+                continue
+            items.append((key, value))
+            unknown_fields.add(key)
     out: dict[str, Any] = {}
     for field, value in items:
         key = rename.get(field, field)
-        if field in json_fields or isinstance(value, (dict, list)):
+        if field in unknown_fields:
+            out[key] = None if value is None else json.dumps(value, default=str)
+        elif field in json_fields:
+            out[key] = None if value is None else json.dumps(value, default=str)
+        elif isinstance(value, (dict, list)):
             out[key] = None if value is None else _sql_value(value)
         else:
             out[key] = value
@@ -100,47 +85,62 @@ def _nest(parents: list[dict[str, Any]], node: dict[str, Any], tables: dict[str,
 
 
 def _nodes_at(doc: dict[str, Any], dotted: str) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
-    """Walk dotted path; return (node, parent) pairs at the leaf."""
+    """Walk a dotted path and return each item with its nearest array-row parent."""
     parts = [p for p in dotted.replace("$.", "").replace("$", "").split(".") if p]
-    stack: list[tuple[dict[str, Any], dict[str, Any] | None]] = [(doc, None)]
+    stack: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = [(doc, doc, doc)]
     for part in parts:
-        nxt: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
-        for node, _parent in stack:
+        nxt: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = []
+        for node, nearest_array_row, parent_for_node in stack:
             child = node.get(part) if isinstance(node, dict) else None
             if isinstance(child, list):
-                nxt.extend((item, node) for item in child if isinstance(item, dict))
+                nxt.extend((item, item, nearest_array_row) for item in child if isinstance(item, dict))
             elif isinstance(child, dict):
-                nxt.append((child, node))
+                nxt.append((child, nearest_array_row, parent_for_node))
         stack = nxt
-    return stack
+    return [(node, parent) for node, _nearest, parent in stack]
 
 
 def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {spec["table"]: [] for spec in flatten}
+    row_ids: dict[int, Any] = {}
+    used_row_ids: dict[str, set[Any]] = defaultdict(set)
     for spec in flatten:
         path = spec.get("from_path") or "$"
         fields = spec.get("fields") or []
         table = spec["table"]
         json_fields = spec.get("json_fields") or []
         rename = spec.get("rename") or {}
+        include_unknown_fields = bool(spec.get("include_unknown_fields"))
+        exclude_fields = spec.get("exclude_fields") or []
         if path in ("$", ""):
-            row = _pick(doc, fields, json_fields, rename)
-            if not fields or "id" in fields:
-                rid = _row_id(doc)
-                if rid is not None:
-                    row[rename.get("id", "id")] = rid
+            row = _pick(doc, fields, json_fields, rename, include_unknown_fields, exclude_fields)
+            if spec.get("emit_id") or not fields or "id" in fields:
+                rid = _row_id(doc) or uuid.uuid4().hex
+                row[rename.get("id", "id")] = rid
+                row_ids[id(doc)] = rid
+                used_row_ids[table].add(rid)
             out[table].append(row)
             continue
         dotted = path.replace("$.", "").lstrip("$")
         for node, parent in _nodes_at(doc, dotted):
-            row = _pick(node, fields, json_fields, rename)
-            if not fields or "id" in fields:
-                rid = _row_id(node)
-                if rid is not None:
-                    row[rename.get("id", "id")] = rid
+            row = _pick(node, fields, json_fields, rename, include_unknown_fields, exclude_fields)
+            if spec.get("emit_id") or not fields or "id" in fields:
+                candidate = _row_id(node)
+                if spec.get("surrogate_id"):
+                    rid = uuid.uuid4().hex
+                    source_id_column = spec.get("source_id_column")
+                    if source_id_column and candidate is not None:
+                        row[source_id_column] = json.dumps(candidate, default=str)
+                else:
+                    rid = candidate if candidate is not None and candidate not in used_row_ids[table] else uuid.uuid4().hex
+                    while rid in used_row_ids[table]:
+                        rid = uuid.uuid4().hex
+                row[rename.get("id", "id")] = rid
+                row_ids[id(node)] = rid
+                used_row_ids[table].add(rid)
             fk = spec.get("parent_fk")
             if fk and parent is not None:
-                row[fk] = _row_id(parent)
+                row[fk] = row_ids.get(id(parent)) or _row_id(parent)
             out[table].append(row)
     return out
 
@@ -171,10 +171,16 @@ class Transformer:
         self.plan = plan or {}
 
     def _tree(self) -> dict[str, Any]:
-        return self.plan.get("model_tree") or _SHOP_TREE
+        tree = self.plan.get("model_tree")
+        if not tree:
+            raise ValueError("Migration plan is missing its document model tree.")
+        return tree
 
     def _flatten_spec(self) -> list[dict[str, Any]]:
-        return self.plan.get("flatten") or _SHOP_FLATTEN
+        flatten = self.plan.get("flatten")
+        if not flatten:
+            raise ValueError("Migration plan is missing its relational mapping.")
+        return flatten
 
     def transform_row(self, row: dict[str, Any], direction: str) -> Any:
         if direction == "relational_to_document":
@@ -186,7 +192,9 @@ class Transformer:
     def transform_batch(self, tables: dict[str, list[dict]], direction: str) -> Any:
         if direction == "relational_to_document":
             tree = self._tree()
-            root = tree.get("from_table") or tree.get("collection") or "customers"
+            root = tree.get("from_table") or tree.get("collection")
+            if not root:
+                raise ValueError("Document model tree is missing its source entity.")
             return _nest(tables.get(root, []), tree, tables)
         if direction == "document_to_relational":
             flatten = self._flatten_spec()

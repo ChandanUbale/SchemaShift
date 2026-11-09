@@ -4,7 +4,7 @@ jobs.py — In-process job runner and progress store.
 Design notes:
 - Jobs run as FastAPI BackgroundTasks (in-process, same worker).
 - State is persisted to SQLite so the UI can poll or receive SSE updates.
-- No Celery / Redis — the demo scale (~10k rows) does not require a distributed queue.
+- No Celery / Redis — jobs run in-process for the current deployment scale.
 - Each job has: job_id (UUID), status, progress_pct, error.
 
 Statuses: PENDING → RUNNING → DONE | FAILED
@@ -51,7 +51,7 @@ def create_job(db: Session, job_type: str, connection_id: int | None = None) -> 
     """
     Persist a new job record in SQLite and return its job_id.
 
-    TODO: Insert a MigrationJob row (or ProfilingJob) into the DB.
+    Job state is persisted by the owning router alongside its domain record.
     """
     job_id = str(uuid.uuid4())
     _progress_cache[job_id] = {

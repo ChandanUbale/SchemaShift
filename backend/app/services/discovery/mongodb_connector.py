@@ -54,6 +54,15 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _direct_child_names(seen: dict[str, int], path: str) -> set[str]:
+    prefix = f"{path}."
+    return {
+        name[len(prefix):].split(".", 1)[0]
+        for name in seen
+        if name.startswith(prefix) and name[len(prefix):]
+    }
+
+
 def walk_doc(
     doc: dict[str, Any],
     prefix: str,
@@ -72,8 +81,9 @@ def walk_doc(
             continue
         types.setdefault(path, set()).add(_type_of(value))
         if isinstance(value, dict):
+            nesting.add(path)
             walk_doc(value, path, types, nulls, seen, nesting)
-        elif isinstance(value, list) and any(isinstance(item, dict) for item in value):
+        elif isinstance(value, list):
             nesting.add(path)
             for item in value:
                 if isinstance(item, dict):
@@ -141,7 +151,14 @@ class MongoDBConnector(BaseConnector):
             "columns": columns,
             "indexes": [],
             "foreign_keys": [],
-            "nesting": [{"path": p, "type": "array"} for p in sorted(nesting)],
+            "nesting": [
+                {
+                    "path": path,
+                    "type": "array" if "array" in types.get(path, set()) else "object",
+                    "child_count": len(_direct_child_names(seen, path)),
+                }
+                for path in sorted(nesting)
+            ],
         }
 
     def fetch_sample(self, entity_name: str, n: int) -> list[dict[str, Any]]:
@@ -155,7 +172,24 @@ class MongoDBConnector(BaseConnector):
         cursor = self._col(entity_name).find().skip(max(offset, 0)).limit(limit)
         return [_jsonable(d) for d in cursor]
 
+    def fetch_by_ids(self, entity_name: str, field_name: str, values: list[Any]) -> list[dict[str, Any]]:
+        if not values:
+            return []
+        query_values = values
+        if field_name == "_id":
+            query_values = [
+                ObjectId(value) if isinstance(value, str) and ObjectId.is_valid(value) else value
+                for value in values
+            ]
+        return [_jsonable(doc) for doc in self._col(entity_name).find({field_name: {"$in": query_values}})]
+
     def estimate_counts(self) -> dict[str, int]:
         if self._db is None:
             raise RuntimeError("MongoDBConnector is not connected")
         return {col: self._db[col].estimated_document_count() for col in self.list_entities()}
+
+    def count_entities(self) -> dict[str, int]:
+        """Return exact collection counts for migration and validation accounting."""
+        if self._db is None:
+            raise RuntimeError("MongoDBConnector is not connected")
+        return {col: self._db[col].count_documents({}) for col in self.list_entities()}

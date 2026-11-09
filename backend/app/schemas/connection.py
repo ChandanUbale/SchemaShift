@@ -11,6 +11,11 @@ class ConnectionCreate(BaseModel):
     is_source: bool = True
 
 
+class ConnectionProbe(BaseModel):
+    source_type: Literal["mysql", "mongodb"]
+    dsn: str
+
+
 class ConnectionRead(BaseModel):
     id: int
     name: str

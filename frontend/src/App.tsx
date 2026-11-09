@@ -3,8 +3,6 @@ import Tooltip from './components/Tooltip';
 import { useMigrationStore } from './store/migrationStore';
 import Step1Connect from './pages/Step1_Connect';
 import Step2Discover from './pages/Step2_Discover';
-import Step3Profile from './pages/Step3_Profile';
-import Step4Recommend from './pages/Step4_Recommend';
 import Step5DryRun from './pages/Step5_DryRun';
 import Step6Migrate from './pages/Step6_Migrate';
 import Step7Validate from './pages/Step7_Validate';
@@ -12,8 +10,6 @@ import Step7Validate from './pages/Step7_Validate';
 const STEPS = [
   'Connect',
   'Discover',
-  'Profile',
-  'Recommend',
   'Dry run',
   'Migrate',
   'Validate & Report',
@@ -31,8 +27,9 @@ function readSize(): UiSize {
 }
 
 export default function App() {
-  const step = useMigrationStore((s) => s.currentStep);
+  const requestedStep = useMigrationStore((s) => s.currentStep);
   const setStep = useMigrationStore((s) => s.setStep);
+  const step = Math.min(Math.max(requestedStep, 1), STEPS.length);
   const error = useMigrationStore((s) => s.error);
   const sourceName = useMigrationStore((s) => s.sourceName);
   const [theme, setTheme] = useState<'light' | 'dark'>(readTheme);
@@ -54,6 +51,10 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (requestedStep !== step) setStep(step);
+  }, [requestedStep, setStep, step]);
+
   const canOpen = (index: number) => index <= step;
 
   return (
@@ -63,13 +64,13 @@ export default function App() {
           <div className="brand-mark" />
           <div>
             <h1>SchemaShift</h1>
-            <p>MIGRATION INTELLIGENCE</p>
+            <p>DATABASE MIGRATION</p>
           </div>
         </div>
         <div className="project-card">
           <small>Active project</small>
-          <strong>Shop modernization</strong>
-          <small>MIG-2026-0917</small>
+          <strong>Database migration</strong>
+          <small>ACTIVE WORKFLOW</small>
         </div>
         <nav className="steps">
           {STEPS.map((label, i) => {
@@ -78,8 +79,6 @@ export default function App() {
             const tips = [
               ['connect', 'Connect a read-only source and save an isolated target.'],
               ['discover', 'Map tables or collections and their relationships.'],
-              ['profile', 'Sample data quality without writing anywhere.'],
-              ['recommend', 'Score document vs relational from workload hints.'],
               ['dryrun', 'Rehearse transforms in memory. Zero target writes.'],
               ['migrate', 'The only step that writes to the approved target.'],
               ['validate', 'Prove counts, samples, and relationships after migrate.'],
@@ -99,14 +98,14 @@ export default function App() {
           })}
         </nav>
         <div className="sidebar-foot">
-          Inspect first. Move with proof.
+          Inspect first. Verify after migration.
           <br />
-          Read-only until step 6.
+          Read-only until step 4.
         </div>
       </aside>
       <main className="main">
         <div className="topbar">
-          <span>Shop modernization / {STEPS[step - 1]}</span>
+          <span>Database migration / {STEPS[step - 1]}</span>
           <div className="topbar-right">
             <Tooltip art="size" title="UI size" text="Shrink or enlarge the whole wizard. S is compact, L is larger.">
               <div className="size-group" role="group" aria-label="UI size">
@@ -139,11 +138,9 @@ export default function App() {
           {error && <div className="error">{error}</div>}
           {step === 1 && <Step1Connect />}
           {step === 2 && <Step2Discover />}
-          {step === 3 && <Step3Profile />}
-          {step === 4 && <Step4Recommend />}
-          {step === 5 && <Step5DryRun />}
-          {step === 6 && <Step6Migrate />}
-          {step === 7 && <Step7Validate />}
+          {step === 3 && <Step5DryRun />}
+          {step === 4 && <Step6Migrate />}
+          {step === 5 && <Step7Validate />}
         </div>
       </main>
     </div>

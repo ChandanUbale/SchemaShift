@@ -14,7 +14,7 @@ class MigrationJob(Base):
     job_id = Column(String(36), unique=True, index=True, nullable=False)  # UUID
     source_connection_id = Column(Integer, nullable=False)
     target_connection_id = Column(Integer, nullable=False)
-    plan_id = Column(String(36), nullable=True)              # recommendation / plan reference
+    plan_id = Column(String(36), nullable=True)              # dry-run plan reference
     is_dry_run = Column(Boolean, default=False)
     approved = Column(Boolean, default=False)
     status = Column(String(20), default="pending")           # pending | running | done | failed

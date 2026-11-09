@@ -12,10 +12,8 @@ from typing import Any
 
 from app.jobs import JobStatus, get_job_status, update_progress
 from app.jobs import _progress_cache
-from app.services.migration.transformer import _SHOP_FLATTEN, _SHOP_TREE
-
 MAX_RETRIES = 3
-_CHILD_FETCH = 10_000_000  # demo scale: load child tables once
+_CHILD_FETCH = 10_000_000  # Fetch related rows once per output batch tree.
 
 
 def _ensure_job(job_id: str) -> None:
@@ -27,6 +25,13 @@ def _ensure_job(job_id: str) -> None:
             "progress_pct": 0,
             "error": None,
         }
+
+
+def _entity_counts(connector) -> dict[str, int]:
+    count_method = getattr(connector, "count_entities", None)
+    if callable(count_method):
+        return count_method() or {}
+    return connector.estimate_counts() or {}
 
 
 def _embed_tables(node: dict[str, Any]) -> list[str]:
@@ -51,7 +56,7 @@ def _write_with_retry(writer, docs: list[dict], collection: str) -> tuple[bool, 
 
 def _flatten_groups(flatten: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
     groups: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    current_root = "customers"
+    current_root = ""
     for spec in flatten:
         path = spec.get("from_path") or "$"
         collection = spec.get("collection")
@@ -62,23 +67,48 @@ def _flatten_groups(flatten: list[dict[str, Any]]) -> list[tuple[str, list[dict[
             continue
         if path in ("$", ""):
             current_root = spec.get("table") or current_root
+            if not current_root:
+                raise ValueError("Root mapping is missing its source table.")
             groups.setdefault(current_root, []).append(spec)
             continue
+        if not current_root:
+            raise ValueError("Nested mappings must follow a root collection mapping.")
         groups.setdefault(current_root, []).append(spec)
-    if not groups:
-        groups["customers"] = list(flatten)
     return list(groups.items())
 
 
-def _audit(batch_index: int, entity: str, rows: int, ok: bool, attempts: int, error: str | None) -> dict:
+def _audit(
+    batch_index: int,
+    entity: str,
+    rows: int,
+    ok: bool,
+    attempts: int,
+    error: str | None,
+    attempted_rows: int | None = None,
+) -> dict:
     return {
         "batch_index": batch_index,
         "entity": entity,
         "rows": rows,
+        "attempted_rows": rows if attempted_rows is None else attempted_rows,
         "ok": ok,
         "attempts": attempts,
         "error": error,
     }
+
+
+def _failure_summary(audit_log: list[dict[str, Any]], failed_batches: int) -> str:
+    failures = [entry for entry in audit_log if entry.get("ok") is False]
+    details = []
+    for entry in failures:
+        reason = entry.get("error") or "No error detail was returned by the writer."
+        details.append(f"{entry.get('entity') or 'entity'}: {reason}")
+    if not details:
+        return f"{failed_batches} batch(es) failed; no per-batch error details were returned."
+    summary = f"{failed_batches} batch(es) failed. " + "; ".join(details[:5])
+    if len(details) > 5:
+        summary += f"; and {len(details) - 5} more failure(s). See the audit timeline."
+    return summary[:1800]
 
 
 class BatchExecutor:
@@ -92,7 +122,9 @@ class BatchExecutor:
         plan: dict[str, Any],
         batch_size: int = 1000,
     ) -> dict[str, Any]:
-        direction = plan.get("direction") or "relational_to_document"
+        direction = plan.get("direction")
+        if not direction:
+            raise ValueError("Migration plan is missing its direction.")
         _ensure_job(job_id)
         pct = 0
         try:
@@ -117,7 +149,7 @@ class BatchExecutor:
             writer.finalize()
             failed = result["batches_failed"]
             status = JobStatus.FAILED if failed else JobStatus.DONE
-            err = f"{failed} batch(es) failed" if failed else None
+            err = _failure_summary(result.get("audit_log") or [], failed) if failed else None
             update_progress(job_id, 100, status, error=err)
             return result
         except Exception as exc:
@@ -135,15 +167,20 @@ class BatchExecutor:
     ) -> dict[str, Any]:
         trees = list(plan.get("model_trees") or [])
         if not trees:
-            trees = [plan.get("model_tree") or _SHOP_TREE]
-        counts = source_connector.estimate_counts() or {}
+            tree = plan.get("model_tree")
+            if not tree:
+                raise ValueError("relational_to_document requires a model tree.")
+            trees = [tree]
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0
         done = 0
 
         for tree in trees:
-            root = tree.get("from_table") or tree.get("collection") or "customers"
+            root = tree.get("from_table") or tree.get("collection")
+            if not root:
+                raise ValueError("Document model tree is missing its source entity.")
             collection = tree.get("collection") or root
             children = {
                 name: source_connector.fetch_batch(name, 0, _CHILD_FETCH)
@@ -165,7 +202,7 @@ class BatchExecutor:
                 else:
                     docs = scoped.transform_batch({root: parents}, "relational_to_document")
                 ok, written, attempts, err = _write_with_retry(writer, docs, collection)
-                audit_log.append(_audit(i, collection, written if ok else len(docs), ok, attempts, err))
+                audit_log.append(_audit(i, collection, written if ok else 0, ok, attempts, err, len(docs)))
                 if not ok:
                     batches_failed += 1
                 done += 1
@@ -186,11 +223,11 @@ class BatchExecutor:
         plan: dict[str, Any],
         batch_size: int,
     ) -> dict[str, Any]:
-        flatten = plan.get("flatten") or _SHOP_FLATTEN
+        flatten = plan.get("flatten") or []
         if not flatten:
             raise ValueError("document_to_relational requires plan['flatten']")
         groups = _flatten_groups(flatten)
-        counts = source_connector.estimate_counts() or {}
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0
@@ -213,11 +250,11 @@ class BatchExecutor:
                     rows = tables.get(table) or []
                     if not batch_ok:
                         audit_log.append(_audit(
-                            i, table, len(rows), False, 0, "skipped after parent batch failure"
+                            i, table, 0, False, 0, "skipped after parent batch failure", len(rows)
                         ))
                         continue
                     ok, written, attempts, err = _write_with_retry(writer, rows, table)
-                    audit_log.append(_audit(i, table, written if ok else len(rows), ok, attempts, err))
+                    audit_log.append(_audit(i, table, written if ok else 0, ok, attempts, err, len(rows)))
                     if not ok:
                         batch_ok = False
                 if not batch_ok:
@@ -241,8 +278,8 @@ class BatchExecutor:
     ) -> dict[str, Any]:
         entities = list(plan.get("entities") or [])
         if not entities:
-            entities = list((source_connector.estimate_counts() or {}).keys())
-        counts = source_connector.estimate_counts() or {}
+            entities = list(_entity_counts(source_connector).keys())
+        counts = _entity_counts(source_connector)
         audit_log: list[dict] = []
         batches_failed = 0
         batches_total = 0
@@ -257,7 +294,7 @@ class BatchExecutor:
             for i, offset in enumerate(range(0, total, batch_size)):
                 rows = source_connector.fetch_batch(entity, offset, batch_size)
                 ok, written, attempts, err = _write_with_retry(writer, rows, entity)
-                audit_log.append(_audit(i, entity, written if ok else len(rows), ok, attempts, err))
+                audit_log.append(_audit(i, entity, written if ok else 0, ok, attempts, err, len(rows)))
                 if not ok:
                     batches_failed += 1
                 done += 1

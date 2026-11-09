@@ -8,10 +8,20 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.connection import Connection
-from app.schemas.connection import ConnectionCreate, ConnectionRead, ConnectionTestResult
+from app.schemas.connection import ConnectionCreate, ConnectionProbe, ConnectionRead, ConnectionTestResult
 from app.services.discovery.connector_factory import ConnectorFactory
+from app.services.discovery.database_inspector import ensure_mysql_database, inspect_connection, list_databases
 
 router = APIRouter()
+
+
+@router.post("/databases")
+def discover_databases(payload: ConnectionProbe):
+    """List databases visible through an unsaved connection string."""
+    try:
+        return {"databases": list_databases(payload.source_type, payload.dsn)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _open_connector(conn_model: Connection):
@@ -68,6 +78,8 @@ def test_connection(connection_id: int, db: Session = Depends(get_db)):
     started = time.perf_counter()
     connector = None
     try:
+        if not row.is_source and row.source_type == "mysql":
+            ensure_mysql_database(row.dsn)
         connector = _open_connector(row)
         connector.connect()
         latency = (time.perf_counter() - started) * 1000
@@ -81,3 +93,15 @@ def test_connection(connection_id: int, db: Session = Depends(get_db)):
                 connector.disconnect()
             except Exception:
                 pass
+
+
+@router.post("/{connection_id}/inspect")
+def inspect_saved_connection(connection_id: int, db: Session = Depends(get_db)):
+    """Connect read-only and list existing tables or collections in the saved database."""
+    row = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    try:
+        return inspect_connection(row.source_type, row.dsn)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

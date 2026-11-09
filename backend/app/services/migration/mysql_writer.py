@@ -165,13 +165,12 @@ class MySQLWriter(BaseWriter):
     def cleanup(self, job_id: str) -> None:
         """
         DROP all tables created by this job.
-        Table names were recorded dynamically during prepare(), or seeded by the cleanup route.
+        Table names were recorded dynamically during prepare(), or restored from the cleanup audit log.
         """
         if not self._conn:
             self._conn = self._get_connection()
 
         tables = list(self._created_tables)
-        tables.sort(key=lambda name: {"order_items": 0, "orders": 1, "customers": 2}.get(name, 50))
 
         with self._conn.cursor() as cursor:
             cursor.execute("SET FOREIGN_KEY_CHECKS=0")

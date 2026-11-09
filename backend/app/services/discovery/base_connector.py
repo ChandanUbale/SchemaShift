@@ -58,3 +58,17 @@ class BaseConnector(ABC):
     def estimate_counts(self) -> dict[str, int]:
         """Return estimated row/document counts per table/collection."""
         ...
+
+    def count_entities(self) -> dict[str, int]:
+        """Return exact entity counts; connectors may override estimate_counts()."""
+        return self.estimate_counts()
+
+    def fetch_by_ids(self, entity_name: str, field_name: str, values: list[Any]) -> list[dict[str, Any]]:
+        """Fetch rows by a key when supported, falling back to a bounded sample."""
+        if not values:
+            return []
+        wanted = {str(value) for value in values}
+        return [
+            row for row in self.fetch_sample(entity_name, max(len(wanted) * 10, 100))
+            if str(row.get(field_name, row.get("_id") if field_name == "id" else None)) in wanted
+        ]

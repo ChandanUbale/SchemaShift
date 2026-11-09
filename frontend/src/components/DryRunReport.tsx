@@ -7,12 +7,11 @@ const ISSUE_LABELS: Record<string, string> = {
   type_mismatch: 'Type mismatches',
 };
 
-export default function DryRunReport({ dryRun, profiling }: { dryRun?: any; profiling?: any }) {
+export default function DryRunReport({ dryRun }: { dryRun?: any }) {
   const issues = dryRun?.issues || [];
   const sampled = dryRun?.sample_size || 0;
   const quarantined = issues.reduce((sum: number, issue: any) => sum + (issue.row_count || 0), 0);
   const transformed = Math.max(sampled - quarantined, 0);
-  const risk = String(profiling?.risk_label || 'low').toUpperCase();
 
   return (
     <>
@@ -34,10 +33,6 @@ export default function DryRunReport({ dryRun, profiling }: { dryRun?: any; prof
               <b className="warn">{issue.row_count} · {issue.description}</b>
             </div>
           ))}
-          <div className="banner warn" style={{ marginTop: 16, marginBottom: 0 }}>
-            <span>Source risk remains separate</span>
-            <b>{risk}</b>
-          </div>
         </div>
         <div className="card">
           <h3>Readiness checklist</h3>

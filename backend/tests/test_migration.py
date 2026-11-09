@@ -7,6 +7,35 @@ from app.services.migration.writer_factory import WriterFactory
 from app.services.migration.mysql_writer import MySQLWriter
 from app.services.migration.mongo_writer import MongoWriter
 
+_RELATIONAL_TEST_PLAN = {
+    "direction": "relational_to_document",
+    "model_tree": {
+        "from_table": "customers",
+        "collection": "customers",
+        "fields": ["id", "name", "email", "created_at"],
+        "embed": [{
+            "from_table": "orders",
+            "as": "orders",
+            "join": {"parent": "id", "child": "customer_id"},
+            "fields": ["id", "order_date", "total", "status"],
+            "embed": [{
+                "from_table": "order_items",
+                "as": "items",
+                "join": {"parent": "id", "child": "order_id"},
+                "fields": ["product_id", "product_name", "quantity", "price"],
+            }],
+        }],
+    },
+}
+_DOCUMENT_TEST_PLAN = {
+    "direction": "document_to_relational",
+    "flatten": [
+        {"table": "customers", "collection": "customers", "from_path": "$", "fields": ["id", "name", "email", "created_at"]},
+        {"table": "orders", "collection": "customers", "from_path": "$.orders", "parent_fk": "customer_id", "fields": ["id", "order_date", "total", "status"]},
+        {"table": "order_items", "collection": "customers", "from_path": "$.orders.items", "parent_fk": "order_id", "fields": ["product_id", "product_name", "quantity", "price"]},
+    ],
+}
+
 
 def test_dry_runner_does_not_import_writers():
     import ast
@@ -43,7 +72,7 @@ def test_dry_runner_does_not_call_writer():
         "orders": [{"id": 10, "customer_id": 1, "order_date": "2023-02-01", "total": 1, "status": "paid"}],
         "order_items": [{"id": 100, "order_id": 10, "product_id": 1, "product_name": "A", "quantity": 1, "price": 1}],
     }
-    issues = DryRunner.run(tables, Transformer({}), {"direction": "relational_to_document"})
+    issues = DryRunner.run(tables, Transformer(_RELATIONAL_TEST_PLAN), _RELATIONAL_TEST_PLAN)
     assert issues == []
     assert writer.write_batch is not None  # constructed, never passed in
 
@@ -66,7 +95,15 @@ def test_dry_runner_reports_dirty_rows():
             {"id": 101, "order_id": 50, "product_id": 1, "product_name": "A", "quantity": 1, "price": 1},
         ],
     }
-    issues = DryRunner.run(tables, Transformer({}), {"direction": "relational_to_document"})
+    plan = {
+        **_RELATIONAL_TEST_PLAN,
+        "source_required_fields": {"customers": ["email"], "order_items": ["quantity"]},
+        "source_foreign_keys": [
+            {"child_table": "orders", "fk_field": "customer_id", "parent_table": "customers", "pk_field": "id"},
+            {"child_table": "order_items", "fk_field": "order_id", "parent_table": "orders", "pk_field": "id"},
+        ],
+    }
+    issues = DryRunner.run(tables, Transformer(plan), plan)
     by_type = {(item["table_or_collection"], item["issue_type"]): item["row_count"] for item in issues}
     assert by_type[("customers", "duplicate_pk")] == 2
     assert by_type[("customers", "invalid_date")] >= 1
@@ -99,11 +136,15 @@ def test_dry_runner_document_sample_and_transform_type_mismatch():
             "items": [{"product_id": 1, "product_name": "A", "quantity": None, "price": 1}],
         }],
     }]
-    issues = DryRunner.run(docs, BoomTransform(), {"direction": "document_to_relational"})
+    plan = {
+        "direction": "document_to_relational",
+        "flatten": [{"table": "records", "collection": "records", "from_path": "$", "fields": ["name"]}],
+        "source_required_fields": {"records": ["name"]},
+    }
+    issues = DryRunner.run({"records": docs}, BoomTransform(), plan)
     types = {item["issue_type"] for item in issues}
     assert "missing_field" in types
     assert "invalid_date" in types
-    assert "orphan_fk" in types
     assert "type_mismatch" in types
 
 
@@ -118,7 +159,12 @@ def test_dry_runner_document_quality_without_flatten_impl():
         "created_at": "2023-01-01",
         "orders": [],
     }]
-    issues = DryRunner.run(docs, Transformer({}), {"direction": "document_to_relational"})
+    plan = {
+        "direction": "document_to_relational",
+        "flatten": [{"table": "records", "collection": "records", "from_path": "$", "fields": ["id", "name"]}],
+        "source_required_fields": {"records": ["name"]},
+    }
+    issues = DryRunner.run({"records": docs}, Transformer(plan), plan)
     assert any(item["issue_type"] == "missing_field" for item in issues)
     assert not any(item["issue_type"] in ("transform_error", "type_mismatch") for item in issues)
 
@@ -137,14 +183,15 @@ def test_transformer_relational_to_document():
             {"id": 102, "order_id": 11, "product_id": 1, "product_name": "A", "quantity": 1, "price": 20.0},
         ],
     }
-    docs = Transformer({}).transform_batch(tables, "relational_to_document")
+    transformer = Transformer(_RELATIONAL_TEST_PLAN)
+    docs = transformer.transform_batch(tables, "relational_to_document")
     assert len(docs) == 1
     assert docs[0]["name"] == "Alice"
     assert "extra" not in docs[0]
     assert len(docs[0]["orders"]) == 2
     assert len(docs[0]["orders"][0]["items"]) == 2
     assert len(docs[0]["orders"][1]["items"]) == 1
-    lone = Transformer({}).transform_row({"id": 1, "name": "Alice"}, "relational_to_document")
+    lone = transformer.transform_row({"id": 1, "name": "Alice"}, "relational_to_document")
     assert lone["orders"] == []
 
 
@@ -178,7 +225,8 @@ def test_transformer_document_to_relational():
             },
         ],
     }
-    tables = Transformer({})._document_to_relational(doc)
+    transformer = Transformer(_DOCUMENT_TEST_PLAN)
+    tables = transformer._document_to_relational(doc)
     assert tables["customers"] == [
         {"id": 1, "name": "Alice", "email": "a@x.com", "created_at": "2023-01-01"}
     ]
@@ -192,12 +240,12 @@ def test_transformer_document_to_relational():
     assert tables["order_items"][0]["product_name"] == "A"
 
     oid_doc = {"_id": "abc", "name": "Bob", "email": "b@x.com", "created_at": None, "orders": []}
-    oid_tables = Transformer({}).transform_row(oid_doc, "document_to_relational")
+    oid_tables = transformer.transform_row(oid_doc, "document_to_relational")
     assert oid_tables["customers"][0]["id"] == "abc"
     assert oid_tables["orders"] == []
     assert oid_tables["order_items"] == []
 
-    merged = Transformer({}).transform_batch({"customers": [doc, oid_doc]}, "document_to_relational")
+    merged = transformer.transform_batch({"customers": [doc, oid_doc]}, "document_to_relational")
     assert len(merged["customers"]) == 2
     assert len(merged["orders"]) == 2
     assert len(merged["order_items"]) == 3
@@ -215,8 +263,8 @@ def test_transformer_roundtrip_shop_fixture():
             {"id": 100, "order_id": 10, "product_id": 1, "product_name": "A", "quantity": 2, "price": 25.0},
         ],
     }
-    docs = Transformer({}).transform_batch(tables, "relational_to_document")
-    back = Transformer({}).transform_batch({"customers": docs}, "document_to_relational")
+    docs = Transformer(_RELATIONAL_TEST_PLAN).transform_batch(tables, "relational_to_document")
+    back = Transformer(_DOCUMENT_TEST_PLAN).transform_batch({"customers": docs}, "document_to_relational")
     assert back["customers"][0]["id"] == 1
     assert back["orders"][0]["customer_id"] == 1
     assert back["order_items"][0]["order_id"] == 10
@@ -279,14 +327,18 @@ def test_plan_builder_converts_any_mongo_collections():
     assert len(tables["trayport_trades_xcap"]) == 1
 
 
-def test_plan_builder_keeps_shop_flatten_and_copies_extra_mongo_collections():
+def test_plan_builder_maps_discovered_mongo_collections_without_shop_defaults():
     from app.services.migration.plan_builder import build_plan
 
     schema = {
         "entities": [
             {
                 "name": "customers",
-                "columns": [{"name": "name", "data_type": "string"}],
+                "columns": [
+                    {"name": "name", "data_type": "string"},
+                    {"name": "orders.total", "data_type": "number"},
+                    {"name": "orders.items.price", "data_type": "number"},
+                ],
                 "nesting": [{"path": "orders", "type": "array"}, {"path": "orders.items", "type": "array"}],
             },
             {"name": "mapping_categories", "columns": [{"name": "name", "data_type": "string"}], "nesting": []},
@@ -294,8 +346,82 @@ def test_plan_builder_keeps_shop_flatten_and_copies_extra_mongo_collections():
     }
     plan = build_plan(schema, "mongodb", "mysql", "mix")
     tables = [spec["table"] for spec in plan["flatten"]]
-    assert tables[:3] == ["customers", "orders", "order_items"]
-    assert "mapping_categories" in tables
+    assert tables == ["customers", "customers_orders", "customers_orders_items", "mapping_categories"]
+    assert all(spec["collection"] in {"customers", "mapping_categories"} for spec in plan["flatten"])
+
+
+def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
+    import json
+
+    from app.services.migration.plan_builder import build_plan
+    from app.services.migration.transformer import Transformer
+
+    schema = {
+        "entities": [{
+            "name": "inventory_rules",
+            "columns": [
+                {"name": "_id", "data_type": "objectid"},
+                {"name": "title", "data_type": "string"},
+                {"name": "tags", "data_type": "array"},
+                {"name": "settings", "data_type": "object"},
+                {"name": "settings.region", "data_type": "string"},
+                {"name": "categoryId", "data_type": "mixed"},
+                {"name": "items", "data_type": "array"},
+                {"name": "items.code", "data_type": "string"},
+                {"name": "items.adjustments", "data_type": "array"},
+                {"name": "items.adjustments.reason", "data_type": "string"},
+            ],
+            "nesting": [
+                {"path": "tags", "type": "array"},
+                {"path": "settings", "type": "object"},
+                {"path": "items", "type": "array"},
+                {"path": "items.adjustments", "type": "array"},
+            ],
+        }],
+    }
+    plan = build_plan(schema, "mongodb", "mysql", "generic-nested-plan")
+    specs = {spec["from_path"]: spec for spec in plan["flatten"]}
+
+    assert list(specs) == ["$", "items", "items.adjustments"]
+    assert "FOREIGN KEY (`parent_id`) REFERENCES `inventory_rules` (`id`)" in plan["generated_ddl"]
+    assert "FOREIGN KEY (`parent_id`) REFERENCES `inventory_rules_items` (`id`)" in plan["generated_ddl"]
+    assert "`tags` JSON NULL" in plan["generated_ddl"]
+    assert "`settings` JSON NULL" in plan["generated_ddl"]
+    assert "`source_document_id` JSON NULL" in plan["generated_ddl"]
+
+    transformed = Transformer(plan).transform_batch({"inventory_rules": [{
+        "_id": "root-1",
+        "title": "Rule",
+        "runtimeFlag": {"enabled": True},
+        "categoryId": "68ad4c589b0afe2827dedc18",
+        "tags": ["fast", "safe"],
+        "settings": {"region": "EU"},
+        "items": [
+            {"code": "A", "unseenMetadata": {"source": "late"}, "adjustments": [{"reason": "correction"}]},
+            {"code": "B", "_id": "reused-embedded-id", "adjustments": [{"_id": "reused-adjustment-id", "reason": "second"}]},
+        ],
+    }]}, "document_to_relational")
+
+    root = transformed["inventory_rules"][0]
+    item_rows = transformed["inventory_rules_items"]
+    adjustment_rows = transformed["inventory_rules_items_adjustments"]
+    assert root["id"] == "root-1"
+    assert json.loads(root["tags"]) == ["fast", "safe"]
+    assert json.loads(root["settings"]) == {"region": "EU"}
+    assert json.loads(root["runtimeFlag"]) == {"enabled": True}
+    assert json.loads(root["categoryId"]) == "68ad4c589b0afe2827dedc18"
+    assert len(item_rows) == 2
+    assert item_rows[0]["id"] != item_rows[1]["id"]
+    assert item_rows[1]["id"] != "reused-embedded-id"
+    assert json.loads(item_rows[1]["source_document_id"]) == "reused-embedded-id"
+    assert all(row["parent_id"] == "root-1" for row in item_rows)
+    assert json.loads(item_rows[0]["unseenMetadata"]) == {"source": "late"}
+    assert len(adjustment_rows) == 2
+    assert adjustment_rows[0]["parent_id"] == item_rows[0]["id"]
+    assert adjustment_rows[0]["reason"] == "correction"
+    assert adjustment_rows[1]["parent_id"] == item_rows[1]["id"]
+    assert adjustment_rows[0]["id"] != adjustment_rows[1]["id"]
+    assert json.loads(adjustment_rows[1]["source_document_id"]) == "reused-adjustment-id"
 
 
 def test_plan_builder_mysql_to_mongo_copies_non_shop_tables():
@@ -311,6 +437,40 @@ def test_plan_builder_mysql_to_mongo_copies_non_shop_tables():
     assert plan["direction"] == "relational_to_document"
     assert collections_to_read(plan) == ["mapping_categories", "role_permissions"]
     assert len(plan["model_trees"]) == 2
+
+
+def test_plan_builder_rejects_empty_schema_instead_of_using_a_fixture():
+    from app.services.migration.plan_builder import build_plan
+
+    with pytest.raises(ValueError, match="No source tables or collections"):
+        build_plan({"entities": []}, "mysql", "mongodb", "empty-plan")
+
+
+def test_select_schema_entities_restricts_entities_and_foreign_keys():
+    from app.services.migration.plan_builder import select_schema_entities
+
+    schema = {
+        "database": "inventory",
+        "entities": [
+            {"name": "orders", "foreign_keys": [
+                {"column": "customer_id", "ref_table": "customers", "ref_column": "id"},
+                {"column": "warehouse_id", "ref_table": "warehouses", "ref_column": "id"},
+            ]},
+            {"name": "customers", "foreign_keys": []},
+            {"name": "warehouses", "foreign_keys": []},
+        ],
+    }
+
+    selected = select_schema_entities(schema, ["orders", "customers"])
+
+    assert selected["database"] == "inventory"
+    assert [entity["name"] for entity in selected["entities"]] == ["orders", "customers"]
+    assert selected["entities"][0]["foreign_keys"] == [
+        {"column": "customer_id", "ref_table": "customers", "ref_column": "id"}
+    ]
+    assert len(schema["entities"][0]["foreign_keys"]) == 2
+    with pytest.raises(ValueError, match="Unknown source entities"):
+        select_schema_entities(schema, ["missing"])
 
 
 def test_batch_executor_writes_every_mongo_collection():
@@ -416,8 +576,8 @@ def test_batch_executor_retries_on_failure():
         "job-retry",
         _FakeConnector([{"id": 1, "name": "A", "email": "a@x.com", "created_at": "2023-01-01"}]),
         writer,
-        Transformer({}),
-        {"direction": "relational_to_document"},
+        Transformer(_RELATIONAL_TEST_PLAN),
+        _RELATIONAL_TEST_PLAN,
         batch_size=1000,
     )
     assert writer.prepared and writer.finalized
@@ -439,12 +599,16 @@ def test_batch_executor_records_failed_batch_after_retries():
         "job-fail",
         _FakeConnector([{"id": 1, "name": "A", "email": "a@x.com", "created_at": "2023-01-01"}]),
         writer,
-        Transformer({}),
-        {"direction": "relational_to_document"},
+        Transformer(_RELATIONAL_TEST_PLAN),
+        _RELATIONAL_TEST_PLAN,
         batch_size=1000,
     )
     assert result["batches_failed"] == 1
     assert result["audit_log"][0]["ok"] is False
+    assert result["audit_log"][0]["rows"] == 0
+    assert result["audit_log"][0]["attempted_rows"] == 1
+    assert result["audit_log"][0]["error"] == "write failed"
+    assert "customers: write failed" in get_job_status("job-fail")["error"]
     assert get_job_status("job-fail")["status"] == JobStatus.FAILED
 
 
@@ -471,8 +635,8 @@ def test_batch_executor_document_to_relational_writes_parents_first():
         "job-flatten",
         _FakeConnector(docs),
         writer,
-        Transformer({}),
-        {"direction": "document_to_relational"},
+        Transformer(_DOCUMENT_TEST_PLAN),
+        _DOCUMENT_TEST_PLAN,
         batch_size=1000,
     )
     assert writer.prepared and writer.finalized
@@ -508,8 +672,8 @@ def test_batch_executor_document_to_relational_skips_children_after_parent_fail(
         "job-flatten-fail",
         _FakeConnector(docs),
         writer,
-        Transformer({}),
-        {"direction": "document_to_relational"},
+        Transformer(_DOCUMENT_TEST_PLAN),
+        _DOCUMENT_TEST_PLAN,
         batch_size=1000,
     )
     assert result["batches_failed"] == 1
@@ -546,31 +710,6 @@ def test_execute_rejects_without_successful_dry_run():
     require_successful_dry_run(_DryJob("done"))
 
 
-def test_execute_rejects_high_risk_without_confirm():
-    from app.services.migration.execute_gate import HIGH_RISK_REQUIRED, require_high_risk_confirm
-
-    require_high_risk_confirm(None, False)
-    require_high_risk_confirm("low", False)
-    require_high_risk_confirm("high", True)
-    with pytest.raises(ValueError, match="confirm_high_risk"):
-        require_high_risk_confirm("high", False)
-    assert HIGH_RISK_REQUIRED.startswith("Profiling risk is High")
-
-
-def test_execute_override_rewrites_plan_for_this_job_only():
-    from app.services.migration.execute_gate import apply_override, shop_plan
-
-    plan = shop_plan("mysql", "p1")
-    assert plan["target_type"] == "mongodb"
-    assert plan["direction"] == "relational_to_document"
-    overridden = apply_override(plan, "mysql")
-    assert overridden["target_type"] == "mysql"
-    assert overridden["direction"] == "document_to_relational"
-    assert plan["target_type"] == "mongodb"
-    assert apply_override(plan, None)["target_type"] == "mongodb"
-    assert apply_override(plan, "mongodb")["direction"] == "relational_to_document"
-
-
 def test_assert_distinct_targets_rejects_same_dsn():
     fastapi = pytest.importorskip("fastapi")
     from fastapi import HTTPException
@@ -583,6 +722,19 @@ def test_assert_distinct_targets_rejects_same_dsn():
     assert_distinct_targets(dsn, dsn, True)
     assert_distinct_targets(dsn, "mysql+pymysql://root:root@localhost:3307/migration_target", False)
     assert fastapi is not None
+
+
+def test_safety_treats_old_compose_mysql_ports_as_one_server(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.config import settings
+    from app.services.migration.safety import assert_distinct_targets
+
+    monkeypatch.setattr(settings, "docker_dsn_rewrite", True)
+    source = "mysql+pymysql://root:root@localhost:3306/catalog"
+    target = "mysql+pymysql://root:root@localhost:3307/catalog"
+    with pytest.raises(HTTPException, match="same database"):
+        assert_distinct_targets(source, target, False)
 
 
 class _CleanupJob:
@@ -601,10 +753,10 @@ def test_cleanup_entities_from_audit_children_first():
         {"batch_index": 0, "entity": "orders", "rows": 2, "ok": True, "attempts": 1, "error": None},
         {"batch_index": 0, "entity": "order_items", "rows": 3, "ok": True, "attempts": 1, "error": None},
     ]
-    assert entities_from_audit(audit, "mysql") == ["order_items", "orders", "customers"]
+    assert entities_from_audit(audit, "mysql") == ["customers", "orders", "order_items"]
     assert entities_from_audit(audit, "mongodb") == ["customers", "orders", "order_items"]
-    assert entities_from_audit([], "mysql") == ["order_items", "orders", "customers"]
-    assert entities_from_audit([], "mongodb") == ["customers"]
+    assert entities_from_audit([], "mysql") == []
+    assert entities_from_audit([], "mongodb") == []
 
 
 def test_cleanup_refuses_source_and_dry_run():
@@ -625,7 +777,7 @@ def test_cleanup_refuses_source_and_dry_run():
 
 
 def test_cleanup_calls_writer_and_does_not_touch_source():
-    from app.services.migration.cleanup import cleanup_entry, entities_from_audit, seed_writer_for_cleanup
+    from app.services.migration.cleanup import cleanup_entry, entities_from_audit, restore_writer_entities_from_audit
 
     class TargetWriter:
         def __init__(self):
@@ -648,7 +800,7 @@ def test_cleanup_calls_writer_and_does_not_touch_source():
     writer = TargetWriter()
     audit = [{"entity": "customers", "ok": True}, {"entity": "orders", "ok": True}]
     entities = entities_from_audit(audit, "mysql")
-    seed_writer_for_cleanup(writer, entities)
+    restore_writer_entities_from_audit(writer, entities)
     writer.cleanup("job-1")
     assert writer.cleaned_job == "job-1"
     assert writer.dropped == {"customers", "orders"}

@@ -4,7 +4,6 @@ database.py — SQLAlchemy engine + session factory for the SQLite app-metadata 
 This database stores:
 - Connection records (source + target DSNs)
 - Job / progress state
-- Profiling results
 - Migration audit logs
 - Validation reports
 

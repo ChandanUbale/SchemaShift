@@ -67,3 +67,4 @@ desktop.ini
 # ── Misc local artifacts ────────────────────────────────────────────────────
 diff.txt
 *.log
+cloudflared.exe
