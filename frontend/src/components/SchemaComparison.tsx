@@ -76,7 +76,64 @@ function sourceGraphForScope(graph: GraphData | null, entities: any[], sourceTyp
   return { nodes: nodes.filter((node) => visibleIds.has(String(node.id))), edges: selectedEdges };
 }
 
+function mysqlToMongoGraph(entities: any[]): GraphData {
+  const entitiesByName = new Map(entities.map((entity) => [String(entity.name), entity]));
+  const parentByChild = new Map<string, { parent: string; fk: any }>();
+  const createsCycle = (child: string, parent: string) => {
+    let ancestor = parent;
+    while (parentByChild.has(ancestor)) {
+      if (ancestor === child) return true;
+      ancestor = parentByChild.get(ancestor)!.parent;
+    }
+    return ancestor === child;
+  };
+
+  for (const entity of entities) {
+    const child = String(entity.name);
+    for (const fk of entity.foreign_keys || []) {
+      const parent = String(fk.ref_table || '');
+      if (!fk.column || !entitiesByName.has(parent) || parent === child || parentByChild.has(child) || createsCycle(child, parent)) continue;
+      parentByChild.set(child, { parent, fk });
+      break;
+    }
+  }
+
+  const childrenByParent = new Map<string, string[]>();
+  for (const [child, relation] of parentByChild) {
+    childrenByParent.set(relation.parent, [...(childrenByParent.get(relation.parent) || []), child]);
+  }
+
+  const fieldsFor = (table: string): string[] => {
+    const entity = entitiesByName.get(table);
+    const nestedForeignKey = parentByChild.get(table)?.fk.column;
+    const fields = (entity?.columns || [])
+      .map((column: any) => String(column.name || ''))
+      .filter((name: string) => name && name !== nestedForeignKey);
+    for (const child of childrenByParent.get(table) || []) {
+      const nestedFields = fieldsFor(child);
+      fields.push(`${child}[] · { ${nestedFields.join(', ')} }`);
+    }
+    return fields;
+  };
+
+  const roots = entities
+    .map((entity) => String(entity.name))
+    .filter((name) => !parentByChild.has(name));
+  return {
+    nodes: roots.map((name) => ({
+      id: name,
+      label: `${sqlIdentifier(name)} (collection)`,
+      columns: fieldsFor(name),
+    })),
+    edges: [],
+  };
+}
+
 function destinationGraph(entities: any[], sourceType: EngineType, targetType: EngineType, source: GraphData): GraphData {
+  if (sourceType === 'mysql' && targetType === 'mongodb') {
+    return mysqlToMongoGraph(entities);
+  }
+
   const nameMap = new Map(entities.map((entity) => [entity.name, sqlIdentifier(entity.name)]));
   const nodes: any[] = [];
   const edges: any[] = [];
@@ -87,11 +144,14 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
     for (const entity of entities) {
       const sourceColumns = entity.columns || [];
       const columnByName = new Map(sourceColumns.map((column: any) => [String(column.name), column]));
-      const arrayPaths = [...new Set<string>((entity.nesting || [])
-        .filter((nest: any) => nest.type === 'array' && sourceColumns.some((column: any) => String(column.name || '').startsWith(`${nest.path}.`)))
+      const childPaths = [...new Set<string>((entity.nesting || [])
+        .filter((nest: any) => ['object', 'array'].includes(String(nest.type || 'object')) && sourceColumns.some((column: any) => String(column.name || '').startsWith(`${nest.path}.`)))
         .map((nest: any) => String(nest.path)))].sort((a, b) => a.split('.').length - b.split('.').length || a.localeCompare(b));
+      const nestTypeByPath = new Map<string, string>((entity.nesting || [])
+        .filter((nest: any) => nest.path)
+        .map((nest: any) => [String(nest.path), String(nest.type || 'object')]));
       const tableByPath = new Map<string, string>([['$', rootTables.get(entity.name)!]]);
-      for (const path of arrayPaths) tableByPath.set(path, uniqueSqlIdentifier(`${entity.name}_${path.replace(/\./g, '_')}`, usedTableNames));
+      for (const path of childPaths) tableByPath.set(path, uniqueSqlIdentifier(`${entity.name}_${path.replace(/\./g, '_')}`, usedTableNames));
 
       const addTableNode = (path: string) => {
         const tableName = tableByPath.get(path)!;
@@ -106,10 +166,10 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
             if (remainder && !remainder.includes('.')) directNames.add(remainder);
           }
         }
-        const childArrays = path === '$'
-          ? new Set(arrayPaths.filter((arrayPath) => !arrayPath.includes('.')))
-          : new Set(arrayPaths.filter((arrayPath) => arrayPath.startsWith(`${path}.`))
-            .map((arrayPath) => arrayPath.slice(path.length + 1)).filter((remainder) => !remainder.includes('.')));
+        const childTables = path === '$'
+          ? new Set(childPaths.filter((childPath) => !childPath.includes('.')))
+          : new Set(childPaths.filter((childPath) => childPath.startsWith(`${path}.`))
+            .map((childPath) => childPath.slice(path.length + 1)).filter((remainder) => !remainder.includes('.')));
         const reserved = new Set(['id']);
         const columns = [path === '$'
           ? 'id · VARCHAR(64) PRIMARY KEY (Mongo _id)'
@@ -122,7 +182,7 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
           columns.push(`${parentColumn} · VARCHAR(64) FK`);
         }
         for (const field of [...directNames].sort()) {
-          if (field === '_id' || field === 'id' || childArrays.has(field)) continue;
+          if (field === '_id' || field === 'id' || childTables.has(field)) continue;
           const fullName = path === '$' ? field : `${path}.${field}`;
           const meta: any = columnByName.get(fullName);
           const hasDescendants = sourceColumns.some((column: any) => String(column.name || '').startsWith(`${fullName}.`));
@@ -143,13 +203,14 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
           reserved.add(sourceIdColumn);
           columns.push(`${sourceIdColumn} · JSON (original embedded key)`);
         }
+        const kind = path === '$' ? 'table' : nestTypeByPath.get(path) === 'array' ? 'array rows' : 'nested object';
         nodes.push({
           id: tableName,
-          label: `${tableName} (${path === '$' ? 'table' : 'array rows'})`,
+          label: `${tableName} (${kind})`,
           columns,
         });
         if (path !== '$') {
-          const parentPaths = arrayPaths.filter((candidate) => path.startsWith(`${candidate}.`));
+          const parentPaths = childPaths.filter((candidate) => path.startsWith(`${candidate}.`));
           const parentPath = parentPaths.sort((a, b) => b.length - a.length)[0] || '$';
           const parentTable = tableByPath.get(parentPath)!;
           edges.push({
@@ -162,7 +223,7 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
       };
 
       addTableNode('$');
-      arrayPaths.forEach(addTableNode);
+      childPaths.forEach(addTableNode);
     }
   } else {
     for (const entity of entities) {
@@ -176,22 +237,6 @@ function destinationGraph(entities: any[], sourceType: EngineType, targetType: E
     }
   }
 
-  // MySQL→MongoDB keeps FK values as document fields; show these as references,
-  // not as database-enforced constraints.
-  if (sourceType === 'mysql' && targetType === 'mongodb') {
-    edges.push(...source.edges.flatMap((edge) => {
-      const sourceName = String(edge.source);
-      const targetName = String(edge.target);
-      if (!nameMap.has(sourceName) || !nameMap.has(targetName)) return [];
-      return [{
-        ...edge,
-        id: `projected-${sourceName}-${targetName}-${edge.source_column || ''}`,
-        source: nameMap.get(sourceName),
-        target: nameMap.get(targetName),
-        label: `reference field: ${edge.source_column || edge.label}`,
-      }];
-    }));
-  }
   return { nodes, edges };
 }
 
@@ -211,14 +256,29 @@ export default function SchemaComparison({
   migrationScope: 'all' | 'selected' | null;
 }) {
   const [activeTab, setActiveTab] = useState<'source' | 'destination'>('source');
+  const [activeEntity, setActiveEntity] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle');
   const allEntities = schema?.entities || [];
   const included: Set<string> = migrationScope === 'selected'
     ? new Set(selectedEntities)
     : new Set<string>(allEntities.map((entity: any) => entity.name));
   const scopedEntities = allEntities.filter((entity: any) => included.has(entity.name));
-  const source = sourceGraphForScope(relationships, allEntities, sourceType, included);
-  const destination = destinationGraph(scopedEntities, sourceType, targetType, source);
+  const selectedEntity = scopedEntities.find((entity: any) => entity.name === activeEntity) || scopedEntities[0];
+  const graphEntities = selectedEntity ? [selectedEntity] : [];
+  const scopedSource = sourceGraphForScope(relationships, allEntities, sourceType, included);
+  const source = sourceGraphForScope(
+    relationships,
+    allEntities,
+    sourceType,
+    new Set(graphEntities.map((entity: any) => entity.name)),
+  );
+  const relationalToDocument = sourceType === 'mysql' && targetType === 'mongodb';
+  const destination = destinationGraph(
+    relationalToDocument ? scopedEntities : graphEntities,
+    sourceType,
+    targetType,
+    relationalToDocument ? scopedSource : source,
+  );
   const graph = activeTab === 'source' ? source : destination;
 
   const copyGraph = async () => {
@@ -294,13 +354,35 @@ export default function SchemaComparison({
           {copyStatus === 'copied' ? 'Paste the Mermaid graph into a compatible editor.' : copyStatus === 'error' ? 'Clipboard access was blocked by the browser.' : 'Copies the active graph, including its relationships.'}
         </span>
       </div>
+      {scopedEntities.length > 1 && (activeTab === 'source' || !relationalToDocument) && (
+        <div className="schema-entity-selector">
+          <span className="schema-entity-selector-label">
+            {sourceType === 'mongodb' ? 'Selected collections:' : 'Selected tables:'}
+          </span>
+          <div className="schema-entity-tabs" role="tablist" aria-label="Selected collections">
+            {scopedEntities.map((entity: any) => (
+              <button
+                key={entity.name}
+                className={`schema-graph-tab${selectedEntity?.name === entity.name ? ' active' : ''}`}
+                type="button"
+                aria-pressed={selectedEntity?.name === entity.name}
+                onClick={() => setActiveEntity(entity.name)}
+              >
+                {entity.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div id="schema-graph-panel" role="tabpanel" aria-labelledby={`${activeTab}-schema-tab`}>
-        <SchemaGraph nodes={graph.nodes} edges={graph.edges} showColumns={activeTab === 'destination'} />
+        <SchemaGraph key={`${selectedEntity?.name || 'empty'}-${activeTab}`} nodes={graph.nodes} edges={graph.edges} showColumns={activeTab === 'destination'} />
       </div>
       <p className="hint schema-projection-note">
         Projected view only: Dry Run reads the source and does not connect to or write to the destination. {targetType === 'mongodb'
-          ? 'Source foreign keys are retained as reference fields in MongoDB documents, not enforced constraints.'
-          : 'Arrays of objects become child tables with parent foreign keys. Nested objects and arrays without discovered object fields remain JSON columns; string reference values are not assumed to be foreign keys. The projection is based on the discovered sample; fields first seen during migration are retained in JSON columns.'}
+          ? sourceType === 'mysql'
+            ? 'Selected MySQL foreign-key relationships are projected as nested arrays within their parent MongoDB collection; references to unselected tables remain source fields.'
+            : 'Each source collection remains a separate MongoDB collection.'
+          : 'Nested objects and arrays of objects become child tables with parent foreign keys. Primitive arrays and values without discovered object fields remain JSON columns; string reference values are not assumed to be foreign keys. The projection is based on the discovered sample; fields first seen during migration are retained in JSON columns.'}
       </p>
     </section>
   );

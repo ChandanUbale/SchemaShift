@@ -69,8 +69,10 @@ def build_plan(
     Plan for whatever entities discovery found.
 
     Mongo → MySQL: one table per collection plus a child table for every
-    discovered array of objects. Other nested values are preserved as JSON.
-    MySQL → MongoDB: one collection per table, retaining FK values as references.
+    discovered nested object and every array of objects. Primitive arrays
+    and values without discovered object fields are preserved as JSON.
+    MySQL → MongoDB: embed related child tables in their referenced parent
+    collection; tables without selected foreign-key relationships remain separate.
     No entity names or sample schema are assumed.
     Same engine: copy each entity.
     """
@@ -204,31 +206,37 @@ def _mysql_sql_type(col: dict[str, Any]) -> str:
     return _MYSQL_TYPES.get(str(col.get("data_type") or "text").lower(), "TEXT")
 
 
+def _child_table_paths(entity: dict[str, Any], columns: list[dict[str, Any]]) -> list[str]:
+    """Nested objects and arrays of objects with discovered fields become tables."""
+    nested_paths = {
+        item.get("path"): item.get("type", "object")
+        for item in entity.get("nesting") or [] if item.get("path")
+    }
+    return sorted(
+        (
+            path for path, kind in nested_paths.items()
+            if kind in ("object", "array")
+            and any(column["name"].startswith(path + ".") for column in columns)
+        ),
+        key=lambda path: (path.count("."), path),
+    )
+
+
 def _generic_mongo_table(
     entity: dict[str, Any],
     root_table: str | None = None,
     used_tables: set[str] | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Build root and normalized array-of-object tables for one collection."""
+    """Build root and normalized nested-object / array-of-object tables for one collection."""
     collection = entity["name"]
     columns = [column for column in entity.get("columns") or [] if column.get("name")]
     column_by_name = {column["name"]: column for column in columns}
-    nested_paths = {
-        item.get("path"): item.get("type", "object")
-        for item in entity.get("nesting") or [] if item.get("path")
-    }
-    array_paths = sorted(
-        (
-            path for path, kind in nested_paths.items()
-            if kind == "array" and any(column["name"].startswith(path + ".") for column in columns)
-        ),
-        key=lambda path: (path.count("."), path),
-    )
+    child_paths = _child_table_paths(entity, columns)
 
     used_tables = used_tables if used_tables is not None else set()
     root_table = root_table or _unique_sql_ident(collection, used_tables)
     table_by_path = {"$": root_table}
-    for path in array_paths:
+    for path in child_paths:
         table_by_path[path] = _unique_sql_ident(f"{collection}_{path.replace('.', '_')}", used_tables)
 
     def direct_field_names(path: str) -> list[str]:
@@ -248,13 +256,13 @@ def _generic_mongo_table(
     def make_spec(path: str, parent_path: str | None = None) -> tuple[dict[str, Any], str]:
         table = table_by_path[path]
         direct_names = direct_field_names(path)
-        child_array_names = {
+        child_table_names = {
             candidate[len(path + "."):]
-            for candidate in array_paths
+            for candidate in child_paths
             if candidate.startswith(path + ".") and "." not in candidate[len(path + "."):]
         } if path != "$" else {
             candidate
-            for candidate in array_paths
+            for candidate in child_paths
             if "." not in candidate
         }
         fields: list[str] = []
@@ -274,7 +282,7 @@ def _generic_mongo_table(
             ])
 
         for field in direct_names:
-            if field in ("_id", "id") or field in child_array_names:
+            if field in ("_id", "id") or field in child_table_names:
                 continue
             full_name = field if path == "$" else f"{path}.{field}"
             column_meta = column_by_name.get(full_name) or {}
@@ -319,7 +327,7 @@ def _generic_mongo_table(
             "rename": rename,
             "emit_id": True,
             "include_unknown_fields": True,
-            "exclude_fields": sorted(child_array_names),
+            "exclude_fields": sorted(child_table_names),
             "surrogate_id": parent_path is not None,
         }
         if parent_fk and parent_path is not None:
@@ -336,8 +344,8 @@ def _generic_mongo_table(
     root_spec, root_ddl = make_spec("$")
     specs = [root_spec]
     ddl_parts = [root_ddl]
-    for path in array_paths:
-        parent_paths = [candidate for candidate in array_paths if path.startswith(candidate + ".")]
+    for path in child_paths:
+        parent_paths = [candidate for candidate in child_paths if path.startswith(candidate + ".")]
         parent_path = max(parent_paths, key=len) if parent_paths else "$"
         spec, ddl = make_spec(path, parent_path)
         specs.append(spec)
@@ -364,19 +372,68 @@ def _mongo_to_mysql(entities: list[dict[str, Any]], plan_id: str | None) -> dict
     }
 
 
-def _mysql_tree_for_table(entity: dict[str, Any]) -> dict[str, Any]:
-    fields = [col.get("name") for col in entity.get("columns") or [] if col.get("name")]
-    name = entity["name"]
-    return {
-        "from_table": name,
-        "collection": sql_ident(name),
-        "fields": fields,
-        "embed": [],
-    }
-
-
 def _mysql_to_mongo(entities: list[dict[str, Any]], plan_id: str | None) -> dict[str, Any]:
-    trees = [_mysql_tree_for_table(entity) for entity in entities]
+    entities_by_name = {entity["name"]: entity for entity in entities}
+    parent_by_child: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    def creates_cycle(child_name: str, parent_name: str) -> bool:
+        ancestor = parent_name
+        while ancestor in parent_by_child:
+            if ancestor == child_name:
+                return True
+            ancestor = parent_by_child[ancestor][0]
+        return ancestor == child_name
+
+    for entity in entities:
+        child_name = entity["name"]
+        for fk in entity.get("foreign_keys") or []:
+            parent_name = fk.get("ref_table")
+            if (
+                not fk.get("column")
+                or parent_name not in entities_by_name
+                or parent_name == child_name
+                or child_name in parent_by_child
+                or creates_cycle(child_name, parent_name)
+            ):
+                continue
+            parent_by_child[child_name] = (parent_name, fk)
+            break
+
+    children_by_parent: dict[str, list[str]] = {name: [] for name in entities_by_name}
+    for child_name, (parent_name, _fk) in parent_by_child.items():
+        children_by_parent[parent_name].append(child_name)
+
+    def build_tree(table_name: str) -> dict[str, Any]:
+        entity = entities_by_name[table_name]
+        nested_fk = parent_by_child.get(table_name)
+        nested_fk_column = nested_fk[1]["column"] if nested_fk else None
+        fields = [
+            col["name"] for col in entity.get("columns") or []
+            if col.get("name") and col["name"] != nested_fk_column
+        ]
+        embed = []
+        for child_name in children_by_parent[table_name]:
+            _parent_name, fk = parent_by_child[child_name]
+            parent_column = fk.get("ref_column") or next(
+                (
+                    col["name"] for col in entity.get("columns") or []
+                    if col.get("primary_key") and col.get("name")
+                ),
+                "id",
+            )
+            child = build_tree(child_name)
+            child["as"] = child_name
+            child["join"] = {"parent": parent_column, "child": fk["column"]}
+            embed.append(child)
+        return {
+            "from_table": table_name,
+            "collection": sql_ident(table_name),
+            "fields": fields,
+            "embed": embed,
+        }
+
+    roots = [name for name in entities_by_name if name not in parent_by_child]
+    trees = [build_tree(name) for name in roots]
     return {
         "plan_id": plan_id,
         "direction": "relational_to_document",

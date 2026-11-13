@@ -382,11 +382,12 @@ def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
     plan = build_plan(schema, "mongodb", "mysql", "generic-nested-plan")
     specs = {spec["from_path"]: spec for spec in plan["flatten"]}
 
-    assert list(specs) == ["$", "items", "items.adjustments"]
+    assert list(specs) == ["$", "items", "settings", "items.adjustments"]
+    assert "CREATE TABLE IF NOT EXISTS `inventory_rules_settings`" in plan["generated_ddl"]
     assert "FOREIGN KEY (`parent_id`) REFERENCES `inventory_rules` (`id`)" in plan["generated_ddl"]
     assert "FOREIGN KEY (`parent_id`) REFERENCES `inventory_rules_items` (`id`)" in plan["generated_ddl"]
     assert "`tags` JSON NULL" in plan["generated_ddl"]
-    assert "`settings` JSON NULL" in plan["generated_ddl"]
+    assert "`region` TEXT NULL" in plan["generated_ddl"]
     assert "`source_document_id` JSON NULL" in plan["generated_ddl"]
 
     transformed = Transformer(plan).transform_batch({"inventory_rules": [{
@@ -405,10 +406,14 @@ def test_mongo_to_mysql_normalizes_nested_object_arrays_generically():
     root = transformed["inventory_rules"][0]
     item_rows = transformed["inventory_rules_items"]
     adjustment_rows = transformed["inventory_rules_items_adjustments"]
+    setting_rows = transformed["inventory_rules_settings"]
     assert root["id"] == "root-1"
+    assert "settings" not in root
     assert json.loads(root["tags"]) == ["fast", "safe"]
-    assert json.loads(root["settings"]) == {"region": "EU"}
     assert json.loads(root["runtimeFlag"]) == {"enabled": True}
+    assert len(setting_rows) == 1
+    assert setting_rows[0]["parent_id"] == "root-1"
+    assert setting_rows[0]["region"] == "EU"
     assert json.loads(root["categoryId"]) == "68ad4c589b0afe2827dedc18"
     assert len(item_rows) == 2
     assert item_rows[0]["id"] != item_rows[1]["id"]
@@ -437,6 +442,73 @@ def test_plan_builder_mysql_to_mongo_copies_non_shop_tables():
     assert plan["direction"] == "relational_to_document"
     assert collections_to_read(plan) == ["mapping_categories", "role_permissions"]
     assert len(plan["model_trees"]) == 2
+
+
+def test_plan_builder_mysql_to_mongo_embeds_related_tables_in_parent_collection():
+    from app.services.migration.batch_executor import BatchExecutor
+    from app.services.migration.plan_builder import build_plan, collections_to_read
+    from app.services.migration.transformer import Transformer
+
+    schema = {
+        "entities": [
+            {
+                "name": "employees",
+                "columns": [{"name": "id", "primary_key": True}, {"name": "name"}],
+                "foreign_keys": [],
+            },
+            {
+                "name": "employee_address",
+                "columns": [{"name": "id", "primary_key": True}, {"name": "employee_id"}, {"name": "city"}],
+                "foreign_keys": [{"column": "employee_id", "ref_table": "employees", "ref_column": "id"}],
+            },
+            {
+                "name": "emergency_contacts",
+                "columns": [{"name": "id", "primary_key": True}, {"name": "employee_id"}, {"name": "phone"}],
+                "foreign_keys": [{"column": "employee_id", "ref_table": "employees", "ref_column": "id"}],
+            },
+        ]
+    }
+
+    plan = build_plan(schema, "mysql", "mongodb", "employee-plan")
+    tree = plan["model_tree"]
+    tables = {
+        "employees": [{"id": 1, "name": "Alice"}],
+        "employee_address": [{"id": 10, "employee_id": 1, "city": "London"}],
+        "emergency_contacts": [{"id": 20, "employee_id": 1, "phone": "555-0100"}],
+    }
+    documents = Transformer(plan).transform_batch(tables, "relational_to_document")
+
+    assert collections_to_read(plan) == ["employees", "employee_address", "emergency_contacts"]
+    assert len(plan["model_trees"]) == 1
+    assert tree["from_table"] == "employees"
+    assert tree["collection"] == "employees"
+    assert [child["from_table"] for child in tree["embed"]] == ["employee_address", "emergency_contacts"]
+    assert [child["fields"] for child in tree["embed"]] == [["id", "city"], ["id", "phone"]]
+    assert documents == [{
+        "id": 1,
+        "name": "Alice",
+        "employee_address": [{"id": 10, "city": "London"}],
+        "emergency_contacts": [{"id": 20, "phone": "555-0100"}],
+    }]
+
+    class DictConnector:
+        def estimate_counts(self):
+            return {name: len(rows) for name, rows in tables.items()}
+
+        def fetch_batch(self, name, offset, limit):
+            return tables[name][offset:offset + limit]
+
+    writer = _FakeWriter()
+    BatchExecutor.run(
+        "mysql-to-mongo-fk-embed",
+        DictConnector(),
+        writer,
+        Transformer(plan),
+        plan,
+        batch_size=100,
+    )
+    assert [collection for collection, _rows in writer.writes] == ["employees"]
+    assert writer.writes[0][1] == documents
 
 
 def test_plan_builder_rejects_empty_schema_instead_of_using_a_fixture():

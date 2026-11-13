@@ -85,19 +85,21 @@ def _nest(parents: list[dict[str, Any]], node: dict[str, Any], tables: dict[str,
 
 
 def _nodes_at(doc: dict[str, Any], dotted: str) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
-    """Walk a dotted path and return each item with its nearest array-row parent."""
+    """Walk a dotted path and return each object with its containing parent document."""
     parts = [p for p in dotted.replace("$.", "").replace("$", "").split(".") if p]
-    stack: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = [(doc, doc, doc)]
+    stack: list[tuple[dict[str, Any], dict[str, Any] | None]] = [(doc, None)]
     for part in parts:
-        nxt: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = []
-        for node, nearest_array_row, parent_for_node in stack:
-            child = node.get(part) if isinstance(node, dict) else None
+        nxt: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        for node, _parent in stack:
+            if not isinstance(node, dict):
+                continue
+            child = node.get(part)
             if isinstance(child, list):
-                nxt.extend((item, item, nearest_array_row) for item in child if isinstance(item, dict))
+                nxt.extend((item, node) for item in child if isinstance(item, dict))
             elif isinstance(child, dict):
-                nxt.append((child, nearest_array_row, parent_for_node))
+                nxt.append((child, node))
         stack = nxt
-    return [(node, parent) for node, _nearest, parent in stack]
+    return stack
 
 
 def _flatten_doc(doc: dict[str, Any], flatten: list[dict[str, Any]]) -> dict[str, list[dict]]:
